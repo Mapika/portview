@@ -45,6 +45,7 @@ struct Cli {
     /// Live-refresh the display every second
     #[arg(short, long)]
     watch: bool,
+
 }
 
 // ── Data types ───────────────────────────────────────────────────────
@@ -303,7 +304,7 @@ fn get_process_name(pid: u32) -> String {
         .to_string()
 }
 
-fn get_process_cmdline(pid: u32) -> String {
+fn get_process_cmdline(pid: u32, max_len: usize) -> String {
     let raw = fs::read(format!("/proc/{}/cmdline", pid)).unwrap_or_default();
     let cmd: String = raw
         .split(|&b| b == 0)
@@ -316,8 +317,8 @@ fn get_process_cmdline(pid: u32) -> String {
         format!("[{}]", get_process_name(pid))
     } else {
         // Truncate for display (safe for multi-byte UTF-8)
-        if cmd.len() > 60 {
-            let mut end = 59;
+        if cmd.len() > max_len {
+            let mut end = max_len - 1;
             while end > 0 && !cmd.is_char_boundary(end) {
                 end -= 1;
             }
@@ -421,7 +422,7 @@ fn count_children(pid: u32) -> u32 {
 
 // ── Assemble port info ───────────────────────────────────────────────
 
-fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
+fn get_port_infos(filter_listening: bool, max_cmd_len: usize) -> Vec<PortInfo> {
     let sockets = get_all_sockets();
     let inode_map = build_inode_to_pid_map();
     let boot_time = get_boot_time();
@@ -454,7 +455,7 @@ fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
             protocol: sock.protocol.strip_suffix('6').unwrap_or(&sock.protocol).to_string(),
             pid,
             process_name: get_process_name(pid),
-            command: get_process_cmdline(pid),
+            command: get_process_cmdline(pid, max_cmd_len),
             user: get_username(uid),
             state: sock.state,
             memory_bytes: rss_bytes,
@@ -788,6 +789,21 @@ fn chrono_free_time() -> String {
     format!("{:02}:{:02}:{:02}", h, m, s)
 }
 
+// ── Terminal helpers ──────────────────────────────────────────────────
+
+fn get_terminal_width() -> Option<u16> {
+    unsafe {
+        let mut winsize: libc::winsize = std::mem::zeroed();
+        if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut winsize) == 0
+            && winsize.ws_col > 0
+        {
+            Some(winsize.ws_col)
+        } else {
+            None
+        }
+    }
+}
+
 // ── Main ─────────────────────────────────────────────────────────────
 
 fn main() {
@@ -806,7 +822,7 @@ fn main() {
 
     // --kill mode (not compatible with watch)
     if let Some(port) = cli.kill {
-        let infos = get_port_infos(false);
+        let infos = get_port_infos(false, compute_max_cmd_len());
         let matches: Vec<&PortInfo> = infos.iter().filter(|i| i.port == port).collect();
 
         if matches.is_empty() {
@@ -850,11 +866,17 @@ fn main() {
     }
 }
 
+fn compute_max_cmd_len() -> usize {
+    let cols = get_terminal_width().unwrap_or(143) as usize;
+    cols.saturating_sub(83).max(20)
+}
+
 fn run_display(cli: &Cli, use_color: bool) {
+    let max_cmd_len = compute_max_cmd_len();
     match cli.target.as_deref() {
         None | Some("scan") => {
             // Default: show table of listening ports
-            let infos = get_port_infos(!cli.all);
+            let infos = get_port_infos(!cli.all, max_cmd_len);
             if cli.json {
                 display_json(&infos);
             } else {
@@ -881,7 +903,7 @@ fn run_display(cli: &Cli, use_color: bool) {
         Some(target) => {
             // Try to parse as port number
             if let Ok(port) = target.parse::<u16>() {
-                let infos = get_port_infos(false);
+                let infos = get_port_infos(false, max_cmd_len);
                 let matches: Vec<&PortInfo> = infos.iter().filter(|i| i.port == port).collect();
 
                 if matches.is_empty() {
@@ -910,7 +932,7 @@ fn run_display(cli: &Cli, use_color: bool) {
                 }
             } else {
                 // Search by process name
-                let infos = get_port_infos(!cli.all);
+                let infos = get_port_infos(!cli.all, max_cmd_len);
                 let target_lower = target.to_lowercase();
                 let matches: Vec<&PortInfo> = infos
                     .iter()
