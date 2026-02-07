@@ -6,6 +6,10 @@ A diagnostic-first port viewer for Linux. No more `lsof -i :3000 | grep LISTEN` 
 
 816 KB single binary. Zero runtime dependencies.
 
+<p align="center">
+  <img src="demo.gif" alt="portview --watch demo" width="720">
+</p>
+
 ## Install
 
 **One-liner** (downloads pre-built binary):
