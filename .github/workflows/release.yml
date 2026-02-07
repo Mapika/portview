@@ -85,3 +85,37 @@ jobs:
             portview-*.tar.gz
             SHA256SUMS
           generate_release_notes: true
+
+  update-formula:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: main
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          merge-multiple: true
+
+      - name: Update formula
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          SHA_X86=$(sha256sum portview-linux-x86_64.tar.gz | awk '{print $1}')
+          SHA_ARM=$(sha256sum portview-linux-aarch64.tar.gz | awk '{print $1}')
+
+          sed -i "s/  version \".*\"/  version \"${VERSION}\"/" Formula/portview.rb
+
+          # Replace x86_64 sha (first occurrence)
+          sed -i "0,/sha256 \".*\"/s|sha256 \".*\"|sha256 \"${SHA_X86}\"|" Formula/portview.rb
+          # Replace aarch64 sha (second occurrence)
+          sed -i "0,/sha256 \"${SHA_X86}\"/! s|sha256 \".*\"|sha256 \"${SHA_ARM}\"|" Formula/portview.rb
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/portview.rb
+          git diff --cached --quiet && exit 0
+          git commit -m "Update Homebrew formula for ${GITHUB_REF_NAME}"
+          git push origin main
