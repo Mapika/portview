@@ -7,10 +7,10 @@ class Portview < Formula
   on_linux do
     if Hardware::CPU.intel?
       url "https://github.com/mapika/portview/releases/download/v#{version}/portview-linux-x86_64.tar.gz"
-      sha256 "0612583386730c59965fecbc33f6b26db7c8010aa6e6019fe9bb58a50bb21bea"
+      sha256 "36d862422142f85fedc8b9a16bf1997270bfa7c4f6cef561e994bd53fc4daae0"
     elsif Hardware::CPU.arm?
       url "https://github.com/mapika/portview/releases/download/v#{version}/portview-linux-aarch64.tar.gz"
-      sha256 "503cec9c03d6449e07b45cb5dfd67f4ca394c9bf0b57a5016172c69bff914059"
+      sha256 "eef39eb8945bc5a9eb4da15f78c22be9d03e026bdb46b870f83110626d312c9c"
     end
   end
 
