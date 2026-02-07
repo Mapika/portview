@@ -1,16 +1,16 @@
 class Portview < Formula
   desc "See what's on your ports, then act on it"
   homepage "https://github.com/mapika/portview"
-  version "0.1.0"
+  version "0.2.0"
   license "MIT"
 
   on_linux do
     if Hardware::CPU.intel?
       url "https://github.com/mapika/portview/releases/download/v#{version}/portview-linux-x86_64.tar.gz"
-      sha256 "795f5c88ca8c6408ac8e720622d4333676d18514739094cf4cd8adb4d41e2dfb"
+      sha256 "0612583386730c59965fecbc33f6b26db7c8010aa6e6019fe9bb58a50bb21bea"
     elsif Hardware::CPU.arm?
       url "https://github.com/mapika/portview/releases/download/v#{version}/portview-linux-aarch64.tar.gz"
-      sha256 "7a118c73600c4fdc1b0ea47c0ce87ecd48d2156e250146bfd935955e15ffed10"
+      sha256 "503cec9c03d6449e07b45cb5dfd67f4ca394c9bf0b57a5016172c69bff914059"
     end
   end
 
