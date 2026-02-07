@@ -81,6 +81,17 @@ portview -k 3000          # SIGTERM
 portview -k 3000 --force  # SIGKILL
 ```
 
+### Watch mode (live refresh)
+
+```bash
+portview --watch            # refresh all ports every 1s
+portview -w 3000            # watch a specific port
+portview -w node            # watch filtered by process name
+portview -w --json          # streaming JSON, useful for piping
+```
+
+The display refreshes every second. Ctrl+C exits cleanly.
+
 ### JSON output
 
 ```bash
