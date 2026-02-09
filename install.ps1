@@ -9,9 +9,13 @@ $InstallDir = "$env:USERPROFILE\.portview\bin"
 
 # -- Detect architecture --
 
-$Arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+$Arch = if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
+    [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+} else {
+    $env:PROCESSOR_ARCHITECTURE
+}
 switch ($Arch) {
-    'X64'   { $Target = 'windows-x86_64' }
+    { $_ -in 'X64', 'AMD64' } { $Target = 'windows-x86_64' }
     default { Write-Error "Unsupported architecture: $Arch"; exit 1 }
 }
 
