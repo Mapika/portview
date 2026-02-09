@@ -14,6 +14,16 @@ class Portview < Formula
     end
   end
 
+  on_macos do
+    if Hardware::CPU.intel?
+      url "https://github.com/mapika/portview/releases/download/v#{version}/portview-darwin-x86_64.tar.gz"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+    elsif Hardware::CPU.arm?
+      url "https://github.com/mapika/portview/releases/download/v#{version}/portview-darwin-aarch64.tar.gz"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+    end
+  end
+
   def install
     bin.install "portview"
   end

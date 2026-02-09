@@ -15,7 +15,8 @@ ARCH="$(uname -m)"
 
 case "$OS" in
     Linux)  os="linux" ;;
-    *)      echo "Error: portview currently only supports Linux."; exit 1 ;;
+    Darwin) os="darwin" ;;
+    *)      echo "Error: portview only supports Linux and macOS."; exit 1 ;;
 esac
 
 case "$ARCH" in
@@ -60,11 +61,20 @@ else
     wget -q "$CHECKSUM_URL" -O "$TMPDIR/SHA256SUMS" 2>/dev/null || true
 fi
 
-# Verify checksum if SHA256SUMS was downloaded and sha256sum is available
-if [ -f "$TMPDIR/SHA256SUMS" ] && command -v sha256sum > /dev/null 2>&1; then
+# Pick a sha256 tool: sha256sum (Linux) or shasum -a 256 (macOS)
+if command -v sha256sum > /dev/null 2>&1; then
+    SHA256CMD="sha256sum"
+elif command -v shasum > /dev/null 2>&1; then
+    SHA256CMD="shasum -a 256"
+else
+    SHA256CMD=""
+fi
+
+# Verify checksum if SHA256SUMS was downloaded and a sha256 tool is available
+if [ -f "$TMPDIR/SHA256SUMS" ] && [ -n "$SHA256CMD" ]; then
     echo "→ Verifying checksum..."
     EXPECTED=$(grep "portview-${TARGET}.tar.gz" "$TMPDIR/SHA256SUMS" | awk '{print $1}')
-    ACTUAL=$(sha256sum "$TMPDIR/portview.tar.gz" | awk '{print $1}')
+    ACTUAL=$($SHA256CMD "$TMPDIR/portview.tar.gz" | awk '{print $1}')
     if [ -z "$EXPECTED" ]; then
         echo "⚠ Warning: No checksum found for portview-${TARGET}.tar.gz in SHA256SUMS"
     elif [ "$EXPECTED" != "$ACTUAL" ]; then
