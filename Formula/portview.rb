@@ -1,7 +1,7 @@
 class Portview < Formula
   desc "See what's on your ports, then act on it"
   homepage "https://github.com/mapika/portview"
-  version "0.5.0"
+  version "0.6.0"
   license "MIT"
 
   on_linux do
