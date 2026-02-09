@@ -10,7 +10,7 @@ categories = ["command-line-utilities"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-tabled = { version = "0.17", features = ["ansi"] }
+tabled = { version = "0.20", features = ["ansi"] }
 colored = "2"
 
 [target.'cfg(unix)'.dependencies]
