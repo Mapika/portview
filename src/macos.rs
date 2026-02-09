@@ -531,3 +531,70 @@ pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
 
     infos
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── process_name_from_path ──────────────────────────────────────
+
+    #[test]
+    fn process_name_full_path() {
+        assert_eq!(process_name_from_path("/usr/bin/nginx"), "nginx");
+    }
+
+    #[test]
+    fn process_name_nested_path() {
+        assert_eq!(
+            process_name_from_path("/Applications/Safari.app/Contents/MacOS/Safari"),
+            "Safari"
+        );
+    }
+
+    #[test]
+    fn process_name_bare_name() {
+        assert_eq!(process_name_from_path("nginx"), "nginx");
+    }
+
+    #[test]
+    fn process_name_empty() {
+        assert_eq!(process_name_from_path(""), "");
+    }
+
+    #[test]
+    fn process_name_trailing_slash() {
+        assert_eq!(process_name_from_path("/usr/bin/"), "");
+    }
+
+    // ── cstr_from_bytes ─────────────────────────────────────────────
+
+    #[test]
+    fn cstr_normal_null_terminated() {
+        assert_eq!(cstr_from_bytes(b"hello\0world"), "hello");
+    }
+
+    #[test]
+    fn cstr_no_null() {
+        assert_eq!(cstr_from_bytes(b"hello"), "hello");
+    }
+
+    #[test]
+    fn cstr_empty() {
+        assert_eq!(cstr_from_bytes(b""), "");
+    }
+
+    #[test]
+    fn cstr_only_null() {
+        assert_eq!(cstr_from_bytes(b"\0"), "");
+    }
+
+    #[test]
+    fn cstr_multiple_nulls() {
+        assert_eq!(cstr_from_bytes(b"\0\0\0"), "");
+    }
+
+    #[test]
+    fn cstr_embedded_null() {
+        assert_eq!(cstr_from_bytes(b"ab\0cd\0"), "ab");
+    }
+}

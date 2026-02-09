@@ -1066,3 +1066,334 @@ fn atty_stdout() -> bool {
 fn atty_stdin() -> bool {
     io::stdin().is_terminal()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    // ── format_bytes ────────────────────────────────────────────────
+
+    #[test]
+    fn format_bytes_zero() {
+        assert_eq!(format_bytes(0), "-");
+    }
+
+    #[test]
+    fn format_bytes_bytes_range() {
+        assert_eq!(format_bytes(1), "1 B");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+    }
+
+    #[test]
+    fn format_bytes_kb_range() {
+        assert_eq!(format_bytes(1024), "1 KB");
+        assert_eq!(format_bytes(1536), "2 KB"); // rounds
+        assert_eq!(format_bytes(1024 * 1024 - 1), "1024 KB");
+    }
+
+    #[test]
+    fn format_bytes_mb_range() {
+        assert_eq!(format_bytes(1024 * 1024), "1 MB");
+        assert_eq!(format_bytes(500 * 1024 * 1024), "500 MB");
+    }
+
+    #[test]
+    fn format_bytes_gb_range() {
+        assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GB");
+        assert_eq!(format_bytes(2 * 1024 * 1024 * 1024), "2.0 GB");
+    }
+
+    #[test]
+    fn format_bytes_u64_max_no_panic() {
+        let result = format_bytes(u64::MAX);
+        assert!(result.contains("GB"));
+    }
+
+    // ── json_escape ─────────────────────────────────────────────────
+
+    #[test]
+    fn json_escape_plain() {
+        assert_eq!(json_escape("hello world"), "hello world");
+    }
+
+    #[test]
+    fn json_escape_empty() {
+        assert_eq!(json_escape(""), "");
+    }
+
+    #[test]
+    fn json_escape_quote() {
+        assert_eq!(json_escape(r#"say "hi""#), r#"say \"hi\""#);
+    }
+
+    #[test]
+    fn json_escape_backslash() {
+        assert_eq!(json_escape(r"a\b"), r"a\\b");
+    }
+
+    #[test]
+    fn json_escape_newline() {
+        assert_eq!(json_escape("a\nb"), r"a\nb");
+    }
+
+    #[test]
+    fn json_escape_carriage_return() {
+        assert_eq!(json_escape("a\rb"), r"a\rb");
+    }
+
+    #[test]
+    fn json_escape_tab() {
+        assert_eq!(json_escape("a\tb"), r"a\tb");
+    }
+
+    #[test]
+    fn json_escape_control_char() {
+        assert_eq!(json_escape("\x01"), r"\u0001");
+    }
+
+    #[test]
+    fn json_escape_null() {
+        assert_eq!(json_escape("\0"), r"\u0000");
+    }
+
+    #[test]
+    fn json_escape_mixed() {
+        assert_eq!(json_escape("a\"b\\c\nd"), r#"a\"b\\c\nd"#);
+    }
+
+    #[test]
+    fn json_escape_unicode_passthrough() {
+        assert_eq!(json_escape("café ☕"), "café ☕");
+    }
+
+    // ── is_valid_color ──────────────────────────────────────────────
+
+    #[test]
+    fn is_valid_color_all_valid() {
+        let valid = [
+            "red",
+            "green",
+            "blue",
+            "cyan",
+            "yellow",
+            "magenta",
+            "white",
+            "bold",
+            "dimmed",
+            "bright_red",
+            "bright_green",
+            "bright_blue",
+            "bright_cyan",
+            "bright_yellow",
+            "bright_magenta",
+            "bright_white",
+            "none",
+        ];
+        for c in &valid {
+            assert!(is_valid_color(c), "{} should be valid", c);
+        }
+    }
+
+    #[test]
+    fn is_valid_color_invalid() {
+        assert!(!is_valid_color(""));
+        assert!(!is_valid_color("fuchsia"));
+        assert!(!is_valid_color("Red")); // case-sensitive
+        assert!(!is_valid_color("#ff0000"));
+    }
+
+    // ── truncate_cmd ────────────────────────────────────────────────
+
+    #[test]
+    fn truncate_cmd_short() {
+        assert_eq!(truncate_cmd("abc", 10), "abc");
+    }
+
+    #[test]
+    fn truncate_cmd_exact_fit() {
+        assert_eq!(truncate_cmd("abcde", 5), "abcde");
+    }
+
+    #[test]
+    fn truncate_cmd_overflow() {
+        let result = truncate_cmd("abcdef", 5);
+        assert_eq!(result, "abcd…");
+    }
+
+    #[test]
+    fn truncate_cmd_max_zero() {
+        let result = truncate_cmd("abc", 0);
+        assert_eq!(result, "…");
+    }
+
+    #[test]
+    fn truncate_cmd_max_one() {
+        let result = truncate_cmd("abc", 1);
+        assert_eq!(result, "…");
+    }
+
+    #[test]
+    fn truncate_cmd_empty_input() {
+        assert_eq!(truncate_cmd("", 10), "");
+    }
+
+    #[test]
+    fn truncate_cmd_multibyte_boundary() {
+        // 'é' is 2 bytes in UTF-8; truncation must not split it
+        let result = truncate_cmd("café123", 5);
+        // "café" is 5 bytes, so end=4 would split 'é'; should back up
+        assert!(result.is_char_boundary(result.len().saturating_sub("…".len())));
+        assert!(result.ends_with('…'));
+    }
+
+    // ── format_addr ─────────────────────────────────────────────────
+
+    #[test]
+    fn format_addr_v4_unspecified() {
+        let addr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        assert_eq!(format_addr(&addr), "*");
+    }
+
+    #[test]
+    fn format_addr_v4_specific() {
+        let addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        assert_eq!(format_addr(&addr), "127.0.0.1");
+    }
+
+    #[test]
+    fn format_addr_v6_unspecified() {
+        let addr = IpAddr::V6(Ipv6Addr::UNSPECIFIED);
+        assert_eq!(format_addr(&addr), "*");
+    }
+
+    #[test]
+    fn format_addr_v6_loopback() {
+        let addr = IpAddr::V6(Ipv6Addr::LOCALHOST);
+        assert_eq!(format_addr(&addr), "::1");
+    }
+
+    #[test]
+    fn format_addr_v6_mapped_v4_unspecified() {
+        // ::ffff:0.0.0.0
+        let addr = IpAddr::V6(Ipv4Addr::UNSPECIFIED.to_ipv6_mapped());
+        assert_eq!(format_addr(&addr), "*");
+    }
+
+    #[test]
+    fn format_addr_v6_mapped_v4_specific() {
+        // ::ffff:192.168.1.1
+        let addr = IpAddr::V6(Ipv4Addr::new(192, 168, 1, 1).to_ipv6_mapped());
+        assert_eq!(format_addr(&addr), "192.168.1.1");
+    }
+
+    #[test]
+    fn format_addr_v6_real() {
+        let addr = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
+        assert_eq!(format_addr(&addr), "2001:db8::1");
+    }
+
+    // ── TcpState Display ────────────────────────────────────────────
+
+    #[test]
+    fn tcp_state_display_matches_as_str() {
+        let states = [
+            TcpState::Listen,
+            TcpState::Established,
+            TcpState::TimeWait,
+            TcpState::CloseWait,
+            TcpState::FinWait1,
+            TcpState::FinWait2,
+            TcpState::SynSent,
+            TcpState::SynRecv,
+            TcpState::Closing,
+            TcpState::LastAck,
+            TcpState::Close,
+            TcpState::Unknown,
+        ];
+        for state in &states {
+            assert_eq!(state.to_string(), state.as_str());
+        }
+    }
+
+    // ── TcpState::from_hex (Linux only) ─────────────────────────────
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tcp_state_from_hex_known() {
+        assert_eq!(TcpState::from_hex("0A"), TcpState::Listen);
+        assert_eq!(TcpState::from_hex("01"), TcpState::Established);
+        assert_eq!(TcpState::from_hex("06"), TcpState::TimeWait);
+        assert_eq!(TcpState::from_hex("08"), TcpState::CloseWait);
+        assert_eq!(TcpState::from_hex("04"), TcpState::FinWait1);
+        assert_eq!(TcpState::from_hex("05"), TcpState::FinWait2);
+        assert_eq!(TcpState::from_hex("02"), TcpState::SynSent);
+        assert_eq!(TcpState::from_hex("03"), TcpState::SynRecv);
+        assert_eq!(TcpState::from_hex("0B"), TcpState::Closing);
+        assert_eq!(TcpState::from_hex("09"), TcpState::LastAck);
+        assert_eq!(TcpState::from_hex("07"), TcpState::Close);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tcp_state_from_hex_unknown() {
+        assert_eq!(TcpState::from_hex("FF"), TcpState::Unknown);
+        assert_eq!(TcpState::from_hex(""), TcpState::Unknown);
+    }
+
+    // ── format_uptime ───────────────────────────────────────────────
+
+    #[test]
+    fn format_uptime_none() {
+        assert_eq!(format_uptime(None), "-");
+    }
+
+    #[test]
+    fn format_uptime_future() {
+        let future = SystemTime::now() + Duration::from_secs(3600);
+        assert_eq!(format_uptime(Some(future)), "-");
+    }
+
+    #[test]
+    fn format_uptime_seconds() {
+        let start = SystemTime::now() - Duration::from_secs(30);
+        let result = format_uptime(Some(start));
+        // Allow ±1s tolerance for test execution time
+        assert!(
+            result == "30s" || result == "29s" || result == "31s",
+            "unexpected: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn format_uptime_minutes() {
+        let start = SystemTime::now() - Duration::from_secs(300);
+        let result = format_uptime(Some(start));
+        assert!(result == "5m" || result == "4m", "unexpected: {}", result);
+    }
+
+    #[test]
+    fn format_uptime_hours_and_minutes() {
+        let start = SystemTime::now() - Duration::from_secs(3660);
+        let result = format_uptime(Some(start));
+        assert!(
+            result == "1h 1m" || result == "1h 0m",
+            "unexpected: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn format_uptime_days_and_hours() {
+        let start = SystemTime::now() - Duration::from_secs(90000);
+        let result = format_uptime(Some(start));
+        assert!(result.contains("d"), "expected days format: {}", result);
+        assert!(
+            result.contains("h"),
+            "expected hours in days format: {}",
+            result
+        );
+    }
+}

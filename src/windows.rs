@@ -544,3 +544,78 @@ pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
 
     infos
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── filetime_to_u64 ─────────────────────────────────────────────
+
+    #[test]
+    fn filetime_to_u64_zero() {
+        assert_eq!(filetime_to_u64(0, 0), 0);
+    }
+
+    #[test]
+    fn filetime_to_u64_low_only() {
+        assert_eq!(filetime_to_u64(42, 0), 42);
+    }
+
+    #[test]
+    fn filetime_to_u64_high_only() {
+        assert_eq!(filetime_to_u64(0, 1), 0x100000000);
+    }
+
+    #[test]
+    fn filetime_to_u64_max() {
+        assert_eq!(filetime_to_u64(u32::MAX, u32::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn filetime_to_u64_combined() {
+        assert_eq!(
+            filetime_to_u64(0x0000_0001, 0x0000_0002),
+            0x0000_0002_0000_0001
+        );
+    }
+
+    // ── filetime_to_system_time ─────────────────────────────────────
+
+    #[test]
+    fn filetime_to_system_time_zero() {
+        assert_eq!(filetime_to_system_time(0, 0), None);
+    }
+
+    #[test]
+    fn filetime_to_system_time_before_unix_epoch() {
+        // Any value below FILETIME_UNIX_OFFSET should return None
+        assert_eq!(filetime_to_system_time(1, 0), None);
+    }
+
+    #[test]
+    fn filetime_to_system_time_unix_epoch() {
+        // FILETIME_UNIX_OFFSET = 116444736000000000 = 0x019DB1DED53E8000
+        let low = (FILETIME_UNIX_OFFSET & 0xFFFFFFFF) as u32;
+        let high = (FILETIME_UNIX_OFFSET >> 32) as u32;
+        let result = filetime_to_system_time(low, high);
+        assert_eq!(result, Some(UNIX_EPOCH));
+    }
+
+    #[test]
+    fn filetime_to_system_time_far_future_no_panic() {
+        // Should not panic even with very large values
+        let result = filetime_to_system_time(u32::MAX, u32::MAX);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn filetime_to_system_time_one_second_after_epoch() {
+        // Unix epoch + 1 second = FILETIME_UNIX_OFFSET + 10_000_000 (100ns intervals)
+        let ft = FILETIME_UNIX_OFFSET + 10_000_000;
+        let low = (ft & 0xFFFFFFFF) as u32;
+        let high = (ft >> 32) as u32;
+        let result = filetime_to_system_time(low, high);
+        let expected = UNIX_EPOCH + Duration::from_secs(1);
+        assert_eq!(result, Some(expected));
+    }
+}

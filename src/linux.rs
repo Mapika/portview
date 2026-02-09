@@ -325,3 +325,105 @@ pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
 
     infos
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── parse_hex_addr_v4 ───────────────────────────────────────────
+
+    #[test]
+    fn parse_hex_addr_v4_loopback() {
+        // 0100007F = 127.0.0.1 in little-endian hex
+        let addr = parse_hex_addr_v4("0100007F");
+        assert_eq!(addr, IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+    }
+
+    #[test]
+    fn parse_hex_addr_v4_unspecified() {
+        let addr = parse_hex_addr_v4("00000000");
+        assert_eq!(addr, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    }
+
+    #[test]
+    fn parse_hex_addr_v4_192_168_1_1() {
+        // 0101A8C0 = 192.168.1.1 in little-endian hex
+        let addr = parse_hex_addr_v4("0101A8C0");
+        assert_eq!(addr, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
+    }
+
+    #[test]
+    fn parse_hex_addr_v4_broadcast() {
+        let addr = parse_hex_addr_v4("FFFFFFFF");
+        assert_eq!(addr, IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255)));
+    }
+
+    #[test]
+    fn parse_hex_addr_v4_invalid_hex() {
+        let addr = parse_hex_addr_v4("ZZZZZZZZ");
+        assert_eq!(addr, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    }
+
+    // ── parse_hex_addr_v6 ───────────────────────────────────────────
+
+    #[test]
+    fn parse_hex_addr_v6_unspecified() {
+        let addr = parse_hex_addr_v6("00000000000000000000000000000000");
+        assert_eq!(addr, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+    }
+
+    #[test]
+    fn parse_hex_addr_v6_loopback() {
+        // ::1 in Linux /proc format (4 groups of LE 32-bit words)
+        let addr = parse_hex_addr_v6("00000000000000000000000001000000");
+        assert_eq!(addr, IpAddr::V6(Ipv6Addr::LOCALHOST));
+    }
+
+    #[test]
+    fn parse_hex_addr_v6_short_input() {
+        let addr = parse_hex_addr_v6("0000");
+        assert_eq!(addr, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+    }
+
+    #[test]
+    fn parse_hex_addr_v6_empty() {
+        let addr = parse_hex_addr_v6("");
+        assert_eq!(addr, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+    }
+
+    // ── parse_addr_port ─────────────────────────────────────────────
+
+    #[test]
+    fn parse_addr_port_v4_loopback_80() {
+        let (addr, port) = parse_addr_port("0100007F:0050", false);
+        assert_eq!(addr, IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+        assert_eq!(port, 80);
+    }
+
+    #[test]
+    fn parse_addr_port_v6_any_443() {
+        let (addr, port) = parse_addr_port("00000000000000000000000000000000:01BB", true);
+        assert_eq!(addr, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+        assert_eq!(port, 443);
+    }
+
+    #[test]
+    fn parse_addr_port_no_colon_v4() {
+        let (addr, port) = parse_addr_port("nocolon", false);
+        assert_eq!(addr, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(port, 0);
+    }
+
+    #[test]
+    fn parse_addr_port_no_colon_v6() {
+        let (addr, port) = parse_addr_port("nocolon", true);
+        assert_eq!(addr, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+        assert_eq!(port, 0);
+    }
+
+    #[test]
+    fn parse_addr_port_bad_port() {
+        let (_, port) = parse_addr_port("0100007F:ZZZZ", false);
+        assert_eq!(port, 0);
+    }
+}
