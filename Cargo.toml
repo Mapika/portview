@@ -11,7 +11,7 @@ categories = ["command-line-utilities"]
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 tabled = { version = "0.20", features = ["ansi"] }
-colored = "2"
+colored = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
