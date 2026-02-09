@@ -1,26 +1,26 @@
 class Portview < Formula
   desc "See what's on your ports, then act on it"
   homepage "https://github.com/mapika/portview"
-  version "0.4.1"
+  version "0.5.0"
   license "MIT"
 
   on_linux do
     if Hardware::CPU.intel?
       url "https://github.com/mapika/portview/releases/download/v#{version}/portview-linux-x86_64.tar.gz"
-      sha256 "a9e5525967b335092cb3606f255338ec83005fa0ad918e08a48babd92d41ba3d"
+      sha256 "c136d661497433c299ee4830249e86aa66c4a2e569bbd33fcd3e595690afe0e4"
     elsif Hardware::CPU.arm?
       url "https://github.com/mapika/portview/releases/download/v#{version}/portview-linux-aarch64.tar.gz"
-      sha256 "115c0d468656db2d451ad3e13d74e041bc338efbde0f22dbecc59bfa9c48cb32"
+      sha256 "75a2e08e71e9c24e3222e72c02dd4a246b582bb3c40d2d3e116e72d101eb70bd"
     end
   end
 
   on_macos do
     if Hardware::CPU.intel?
       url "https://github.com/mapika/portview/releases/download/v#{version}/portview-darwin-x86_64.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+      sha256 "2079a915ee5606b5ec98bc5924e371106383521327b0af3f6c12a42bf710d4d8"
     elsif Hardware::CPU.arm?
       url "https://github.com/mapika/portview/releases/download/v#{version}/portview-darwin-aarch64.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+      sha256 "8e8d20342d71072e382d91692090d6d1c650d5e002fdce24795435010d902b9a"
     end
   end
 
