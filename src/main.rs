@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
 use crossterm::ExecutableCommand;
 use std::io::{self, IsTerminal, Write};
@@ -21,7 +21,9 @@ mod windows;
 #[cfg(target_os = "windows")]
 use windows::get_port_infos;
 
+mod docker;
 mod tui;
+use docker::{get_docker_port_map, DockerPortMap, DockerPortOwner};
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 compile_error!("portview only supports Linux, macOS, and Windows");
@@ -33,14 +35,18 @@ compile_error!("portview only supports Linux, macOS, and Windows");
     name = "portview",
     about = "See what's on your ports, then act on it.",
     version,
-    after_help = "Examples:\n  portview          Show all listening ports\n  portview 3000     Inspect port 3000 in detail\n  portview scan     Show all ports in a compact table\n  portview -k 3000  Kill the process on port 3000"
+    after_help = "Examples:\n  portview                   Show all listening ports\n  portview 3000              Inspect port 3000 in detail\n  portview watch --docker    Interactive watch with Docker context\n  portview kill 3000 --force Force-kill process(es) on port 3000\n\nLegacy flags (--watch, --kill) are still supported."
 )]
 struct Cli {
+    /// UX-first subcommands
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Port number to inspect, or 'scan' to list all
     target: Option<String>,
 
     /// Kill the process on the specified port
-    #[arg(short, long)]
+    #[arg(short, long, hide = true)]
     kill: Option<u16>,
 
     /// Force kill (SIGKILL instead of SIGTERM)
@@ -55,17 +61,62 @@ struct Cli {
     #[arg(long)]
     json: bool,
 
+    /// Enrich output with Docker container ownership when available
+    #[arg(long)]
+    docker: bool,
+
     /// Don't use colors
     #[arg(long)]
     no_color: bool,
 
     /// Live-refresh the display every second
-    #[arg(short, long)]
+    #[arg(short, long, hide = true)]
     watch: bool,
 
     /// Don't truncate the command column (use full terminal width)
     #[arg(long)]
     wide: bool,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Live-refresh the display (interactive TUI by default)
+    Watch {
+        /// Port number or process name filter
+        target: Option<String>,
+        /// Show all ports including non-listening
+        #[arg(short, long)]
+        all: bool,
+        /// Output as JSON (streaming in watch mode)
+        #[arg(long)]
+        json: bool,
+        /// Enable Docker ownership context
+        #[arg(long)]
+        docker: bool,
+        /// Force kill (default for d in TUI / kill prompts)
+        #[arg(short, long)]
+        force: bool,
+        /// Don't truncate the command column
+        #[arg(long)]
+        wide: bool,
+        /// Disable all colors
+        #[arg(long)]
+        no_color: bool,
+    },
+    /// Kill process(es) bound to a port
+    Kill {
+        /// Port to kill
+        port: u16,
+        /// Force kill (SIGKILL / TerminateProcess)
+        #[arg(short, long)]
+        force: bool,
+        /// Show Docker ownership context before killing
+        #[arg(long)]
+        docker: bool,
+        /// Disable all colors
+        #[arg(long)]
+        no_color: bool,
+    },
 }
 
 // ── Data types ───────────────────────────────────────────────────────
@@ -273,7 +324,7 @@ pub(crate) fn truncate_cmd(cmd: &str, max_len: usize) -> String {
     }
 }
 
-fn wrap_cmd(cmd: &str, width: usize) -> Vec<String> {
+pub(crate) fn wrap_cmd(cmd: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![cmd.to_string()];
     }
@@ -308,26 +359,14 @@ fn wrap_cmd(cmd: &str, width: usize) -> Vec<String> {
 
 pub(crate) fn format_addr(addr: &IpAddr) -> String {
     match addr {
-        IpAddr::V4(v4) => {
-            if v4.is_unspecified() {
-                "*".to_string()
-            } else {
-                v4.to_string()
-            }
-        }
-        IpAddr::V6(v6) => {
-            if v6.is_unspecified() {
-                "*".to_string()
-            } else if let Some(v4) = v6.to_ipv4_mapped() {
-                if v4.is_unspecified() {
-                    "*".to_string()
-                } else {
-                    v4.to_string()
-                }
-            } else {
-                v6.to_string()
-            }
-        }
+        IpAddr::V4(v4) if v4.is_unspecified() => "*".to_string(),
+        IpAddr::V4(v4) => v4.to_string(),
+        IpAddr::V6(v6) if v6.is_unspecified() => "*".to_string(),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) if v4.is_unspecified() => "*".to_string(),
+            Some(v4) => v4.to_string(),
+            None => v6.to_string(),
+        },
     }
 }
 
@@ -464,6 +503,7 @@ pub(crate) fn color_name_to_ratatui_style(name: &str) -> ratatui::style::Style {
 }
 
 /// StyleConfig for TUI: holds ratatui styles per column.
+#[derive(Default)]
 pub(crate) struct StyleConfig {
     pub(crate) port: ratatui::style::Style,
     pub(crate) proto: ratatui::style::Style,
@@ -486,19 +526,6 @@ impl StyleConfig {
             uptime: color_name_to_ratatui_style(&cc.uptime),
             mem: color_name_to_ratatui_style(&cc.mem),
             command: color_name_to_ratatui_style(&cc.command),
-        }
-    }
-
-    pub(crate) fn no_color() -> Self {
-        Self {
-            port: ratatui::style::Style::default(),
-            proto: ratatui::style::Style::default(),
-            pid: ratatui::style::Style::default(),
-            user: ratatui::style::Style::default(),
-            process: ratatui::style::Style::default(),
-            uptime: ratatui::style::Style::default(),
-            mem: ratatui::style::Style::default(),
-            command: ratatui::style::Style::default(),
         }
     }
 
@@ -538,24 +565,9 @@ fn write_styled(w: &mut impl Write, text: &str, color_name: &str, use_color: boo
     let _ = w.execute(SetAttribute(Attribute::Reset));
 }
 
-// ── Display functions ────────────────────────────────────────────────
-
-fn display_table(
-    infos: &[PortInfo],
-    use_color: bool,
-    colors: &ColorConfig,
-    wide: bool,
-    cmd_width: usize,
-) {
-    if infos.is_empty() {
-        let mut out = io::stdout();
-        write_styled(&mut out, "No listening ports found.\n", "dimmed", use_color);
-        return;
-    }
-
-    let mut out = io::stdout();
-
-    // Compute column widths
+/// Compute the widths of the 7 non-command columns based on data content.
+/// Returns [port_w, proto_w, pid_w, user_w, process_w, uptime_w, mem_w].
+fn measure_column_widths(infos: &[PortInfo]) -> [usize; 7] {
     let port_w = infos
         .iter()
         .map(|i| i.port.to_string().len())
@@ -593,37 +605,53 @@ fn display_table(
         .max()
         .unwrap_or(0)
         .max(3);
-    // Keep table width bounded to terminal width in both modes.
-    // In --wide mode we wrap command values into multiple row lines.
+    [port_w, proto_w, pid_w, user_w, proc_w, uptime_w, mem_w]
+}
+
+fn write_table_border(out: &mut impl Write, widths: &[usize], left: &str, mid: &str, right: &str) {
+    let _ = write!(out, "{}", left);
+    for (i, &w) in widths.iter().enumerate() {
+        let _ = write!(out, "{}", "─".repeat(w + 2));
+        if i < widths.len() - 1 {
+            let _ = write!(out, "{}", mid);
+        }
+    }
+    let _ = writeln!(out, "{}", right);
+}
+
+// ── Display functions ────────────────────────────────────────────────
+
+fn display_table(
+    infos: &[PortInfo],
+    use_color: bool,
+    colors: &ColorConfig,
+    wide: bool,
+    cmd_width: usize,
+) {
+    if infos.is_empty() {
+        let mut out = io::stdout();
+        write_styled(&mut out, "No listening ports found.\n", "dimmed", use_color);
+        return;
+    }
+
+    let mut out = io::stdout();
+
+    let col_widths = measure_column_widths(infos);
     let actual_cmd_w = cmd_width.max(7);
 
-    let widths = [
-        port_w,
-        proto_w,
-        pid_w,
-        user_w,
-        proc_w,
-        uptime_w,
-        mem_w,
-        actual_cmd_w,
-    ];
+    let mut widths = [0usize; 8];
+    widths[..7].copy_from_slice(&col_widths);
+    widths[7] = actual_cmd_w;
     let headers = [
         "PORT", "PROTO", "PID", "USER", "PROCESS", "UPTIME", "MEM", "COMMAND",
     ];
 
     // Top border
-    let _ = write!(out, "╭");
-    for (i, &w) in widths.iter().enumerate() {
-        let _ = write!(out, "{}", "─".repeat(w + 2));
-        if i < widths.len() - 1 {
-            let _ = write!(out, "┬");
-        }
-    }
-    let _ = writeln!(out, "╮");
+    write_table_border(&mut out, &widths, "╭", "┬", "╮");
 
     // Header
     let _ = write!(out, "│");
-    for (i, (&w, &h)) in widths.iter().zip(headers.iter()).enumerate() {
+    for (&w, &h) in widths.iter().zip(headers.iter()) {
         let _ = write!(out, " ");
         if use_color {
             let _ = out.execute(SetAttribute(Attribute::Bold));
@@ -633,19 +661,11 @@ fn display_table(
             let _ = out.execute(SetAttribute(Attribute::Reset));
         }
         let _ = write!(out, " │");
-        let _ = i; // used in loop
     }
     let _ = writeln!(out);
 
     // Separator
-    let _ = write!(out, "├");
-    for (i, &w) in widths.iter().enumerate() {
-        let _ = write!(out, "{}", "─".repeat(w + 2));
-        if i < widths.len() - 1 {
-            let _ = write!(out, "┼");
-        }
-    }
-    let _ = writeln!(out, "┤");
+    write_table_border(&mut out, &widths, "├", "┼", "┤");
 
     // Data rows
     let color_names = [
@@ -662,10 +682,15 @@ fn display_table(
     for info in infos {
         let uptime_str = format_uptime(info.start_time);
         let mem_str = format_bytes(info.memory_bytes);
+        let pid_str = if info.pid == 0 {
+            "-".to_string()
+        } else {
+            info.pid.to_string()
+        };
         let base_values = [
             info.port.to_string(),
             info.protocol.clone(),
-            info.pid.to_string(),
+            pid_str,
             info.user.clone(),
             info.process_name.clone(),
             uptime_str,
@@ -702,20 +727,14 @@ fn display_table(
     }
 
     // Bottom border
-    let _ = write!(out, "╰");
-    for (i, &w) in widths.iter().enumerate() {
-        let _ = write!(out, "{}", "─".repeat(w + 2));
-        if i < widths.len() - 1 {
-            let _ = write!(out, "┴");
-        }
-    }
-    let _ = writeln!(out, "╯");
+    write_table_border(&mut out, &widths, "╰", "┴", "╯");
 }
 
 fn display_detail(info: &PortInfo, use_color: bool) {
     let mut out = io::stdout();
     let bind_str = format!("{}:{}", format_addr(&info.local_addr), info.port);
     let uptime = format_uptime(info.start_time);
+    let is_docker = info.pid == 0;
 
     let _ = writeln!(out);
     if use_color {
@@ -728,9 +747,20 @@ fn display_detail(info: &PortInfo, use_color: bool) {
         write_styled(&mut out, "—", "dimmed", true);
         let _ = write!(out, " ");
         write_styled(&mut out, &info.process_name, "green", true);
-        let _ = write!(out, " ");
-        write_styled(&mut out, &format!("(PID {})", info.pid), "yellow", true);
+        if is_docker {
+            let _ = write!(out, " ");
+            write_styled(&mut out, "[container]", "cyan", true);
+        } else {
+            let _ = write!(out, " ");
+            write_styled(&mut out, &format!("(PID {})", info.pid), "yellow", true);
+        }
         let _ = writeln!(out);
+    } else if is_docker {
+        let _ = writeln!(
+            out,
+            "Port {} ({}) — {} [container]",
+            info.port, info.protocol, info.process_name,
+        );
     } else {
         let _ = writeln!(
             out,
@@ -739,33 +769,168 @@ fn display_detail(info: &PortInfo, use_color: bool) {
         );
     }
 
-    let rows: &[(&str, String)] = &[
-        ("Bind:", bind_str),
-        ("Command:", info.command.clone()),
-        ("User:", info.user.clone()),
-        (
-            "Started:",
+    if is_docker {
+        let rows: &[(&str, String)] = &[
+            ("Bind:", bind_str),
+            ("Image:", info.command.clone()),
+            ("State:", info.state.to_string()),
+        ];
+        for (label, value) in rows {
             if use_color {
-                uptime.clone()
+                let _ = write!(out, "  ");
+                write_styled(&mut out, label, "dimmed", true);
+                let _ = writeln!(out, "  {}", value);
             } else {
-                format!("{} ago", uptime)
-            },
-        ),
-        ("Memory:", format_bytes(info.memory_bytes)),
-        ("CPU time:", format!("{:.1}s", info.cpu_seconds)),
-        ("Children:", info.children.to_string()),
-        ("State:", info.state.to_string()),
-    ];
+                let _ = writeln!(out, "  {:<9} {}", label, value);
+            }
+        }
+    } else {
+        let rows: &[(&str, String)] = &[
+            ("Bind:", bind_str),
+            ("Command:", info.command.clone()),
+            ("User:", info.user.clone()),
+            (
+                "Started:",
+                if use_color {
+                    uptime.clone()
+                } else {
+                    format!("{} ago", uptime)
+                },
+            ),
+            ("Memory:", format_bytes(info.memory_bytes)),
+            ("CPU time:", format!("{:.1}s", info.cpu_seconds)),
+            ("Children:", info.children.to_string()),
+            ("State:", info.state.to_string()),
+        ];
 
-    for (label, value) in rows {
-        if use_color {
-            let _ = write!(out, "  ");
-            write_styled(&mut out, label, "dimmed", true);
-            let _ = writeln!(out, "  {}", value);
-        } else {
-            let _ = writeln!(out, "  {:<9} {}", label, value);
+        for (label, value) in rows {
+            if use_color {
+                let _ = write!(out, "  ");
+                write_styled(&mut out, label, "dimmed", true);
+                let _ = writeln!(out, "  {}", value);
+            } else {
+                let _ = writeln!(out, "  {:<9} {}", label, value);
+            }
         }
     }
+}
+
+fn display_docker_context(port: u16, docker_map: &DockerPortMap, use_color: bool) {
+    let Some(owners) = docker_map.get(&port) else {
+        return;
+    };
+
+    let mut out = io::stdout();
+    if use_color {
+        let _ = write!(out, "  ");
+        write_styled(&mut out, "Docker:", "dimmed", true);
+        let _ = writeln!(out);
+        for owner in owners {
+            let _ = write!(out, "    ");
+            write_styled(&mut out, &owner.container_name, "green", true);
+            let _ = write!(
+                out,
+                " ({}) [{}] -> {} {}/{}",
+                short_container_id(&owner.container_id),
+                owner.image,
+                port,
+                owner.container_port,
+                owner.protocol
+            );
+            let _ = writeln!(out);
+        }
+    } else {
+        let _ = writeln!(out, "  Docker:");
+        for owner in owners {
+            let _ = writeln!(
+                out,
+                "    {} ({}) [{}] -> {} {}/{}",
+                owner.container_name,
+                short_container_id(&owner.container_id),
+                owner.image,
+                port,
+                owner.container_port,
+                owner.protocol
+            );
+        }
+    }
+}
+
+fn docker_brief_tag(port: u16, docker_map: &DockerPortMap) -> Option<String> {
+    let owners = docker_map.get(&port)?;
+    let first = owners.first()?;
+    if owners.len() == 1 {
+        Some(first.container_name.clone())
+    } else {
+        Some(format!("{}+{}", first.container_name, owners.len() - 1))
+    }
+}
+
+fn annotate_infos_with_docker(infos: &mut [PortInfo], docker_map: &DockerPortMap) {
+    for info in infos {
+        if info.pid == 0 {
+            continue;
+        }
+        let Some(tag) = docker_brief_tag(info.port, docker_map) else {
+            continue;
+        };
+        if info.command.contains("[docker:") {
+            continue;
+        }
+        info.command = format!("{} [docker:{}]", info.command, tag);
+    }
+}
+
+/// Create synthetic PortInfo entries for Docker-published ports that have no
+/// host PID match. These appear as regular rows in all views.
+pub(crate) fn synthesize_docker_entries(
+    infos: &[PortInfo],
+    docker_map: &DockerPortMap,
+) -> Vec<PortInfo> {
+    let host_ports: std::collections::HashSet<u16> = infos.iter().map(|i| i.port).collect();
+    let mut synthetic = Vec::new();
+
+    for (&host_port, owners) in docker_map {
+        if host_ports.contains(&host_port) {
+            continue;
+        }
+        for owner in owners {
+            let command = format!(
+                "{} :{}->{}/{}",
+                owner.image,
+                host_port,
+                owner.container_port,
+                owner.protocol.to_lowercase(),
+            );
+            synthetic.push(PortInfo {
+                port: host_port,
+                protocol: owner.protocol.clone(),
+                pid: 0,
+                process_name: owner.container_name.clone(),
+                command,
+                user: "docker".to_string(),
+                state: TcpState::Listen,
+                memory_bytes: 0,
+                cpu_seconds: 0.0,
+                start_time: None,
+                children: 0,
+                local_addr: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            });
+        }
+    }
+
+    // Dedup: sort by (port, protocol, container_name) then dedup
+    synthetic.sort_by(|a, b| {
+        a.port
+            .cmp(&b.port)
+            .then_with(|| a.protocol.cmp(&b.protocol))
+            .then_with(|| a.process_name.cmp(&b.process_name))
+    });
+    synthetic.dedup_by(|a, b| {
+        a.port == b.port && a.protocol == b.protocol && a.process_name == b.process_name
+    });
+
+    synthetic
 }
 
 fn prompt_kill(pid: u32, force: bool) -> bool {
@@ -849,13 +1014,16 @@ pub(crate) fn kill_process(pid: u32, _force: bool) -> io::Result<&'static str> {
     }
 }
 
-#[cfg(unix)]
 pub(crate) fn do_kill(pid: u32, force: bool) {
     match kill_process(pid, force) {
-        Ok(signal_name) => {
+        Ok(action) => {
             let mut out = io::stdout();
             write_styled(&mut out, "  ✓", "green", true);
-            let _ = writeln!(out, " Sent {} to PID {}", signal_name, pid);
+            let msg = match action {
+                "TerminateProcess" => format!(" Terminated PID {}", pid),
+                _ => format!(" Sent {} to PID {}", action, pid),
+            };
+            let _ = writeln!(out, "{}", msg);
         }
         Err(err) => {
             let mut out = io::stderr();
@@ -864,26 +1032,6 @@ pub(crate) fn do_kill(pid: u32, force: bool) {
                 let _ = writeln!(out, " {}", err);
             } else {
                 let _ = writeln!(out, " Failed to kill PID {}: {}", pid, err);
-            }
-        }
-    }
-}
-
-#[cfg(windows)]
-pub(crate) fn do_kill(pid: u32, force: bool) {
-    match kill_process(pid, force) {
-        Ok(_) => {
-            let mut out = io::stdout();
-            write_styled(&mut out, "  ✓", "green", true);
-            let _ = writeln!(out, " Terminated PID {}", pid);
-        }
-        Err(err) => {
-            let mut out = io::stderr();
-            write_styled(&mut out, "  ✗", "red", true);
-            if err.kind() == io::ErrorKind::InvalidInput {
-                let _ = writeln!(out, " {}", err);
-            } else {
-                let _ = writeln!(out, " Failed to terminate PID {}: {}", pid, err);
             }
         }
     }
@@ -907,27 +1055,69 @@ fn json_escape(s: &str) -> String {
     escaped
 }
 
-fn display_json(infos: &[PortInfo]) {
-    print!("[");
+pub(crate) fn short_container_id(id: &str) -> &str {
+    match id.char_indices().nth(12) {
+        Some((idx, _)) => &id[..idx],
+        None => id,
+    }
+}
+
+fn docker_owner_json(owner: &DockerPortOwner) -> String {
+    format!(
+        r#"{{"container_id":"{}","container":"{}","image":"{}","container_port":{},"protocol":"{}"}}"#,
+        json_escape(&owner.container_id),
+        json_escape(&owner.container_name),
+        json_escape(&owner.image),
+        owner.container_port,
+        json_escape(&owner.protocol),
+    )
+}
+
+fn port_info_json(info: &PortInfo, docker_owners: Option<&[DockerPortOwner]>) -> String {
+    let mut json = format!(
+        r#"{{"port":{},"protocol":"{}","pid":{},"process":"{}","command":"{}","user":"{}","state":"{}","memory_bytes":{},"cpu_seconds":{:.1},"children":{}"#,
+        info.port,
+        json_escape(&info.protocol),
+        info.pid,
+        json_escape(&info.process_name),
+        json_escape(&info.command),
+        json_escape(&info.user),
+        info.state,
+        info.memory_bytes,
+        info.cpu_seconds,
+        info.children,
+    );
+
+    if let Some(owners) = docker_owners {
+        json.push_str(r#","docker":["#);
+        for (i, owner) in owners.iter().enumerate() {
+            if i > 0 {
+                json.push(',');
+            }
+            json.push_str(&docker_owner_json(owner));
+        }
+        json.push(']');
+    }
+
+    json.push('}');
+    json
+}
+
+fn display_json(infos: &[PortInfo], docker_map: Option<&DockerPortMap>) -> io::Result<()> {
+    let mut json = String::from("[");
     for (i, info) in infos.iter().enumerate() {
         if i > 0 {
-            print!(",");
+            json.push(',');
         }
-        print!(
-            r#"{{"port":{},"protocol":"{}","pid":{},"process":"{}","command":"{}","user":"{}","state":"{}","memory_bytes":{},"cpu_seconds":{:.1},"children":{}}}"#,
-            info.port,
-            json_escape(&info.protocol),
-            info.pid,
-            json_escape(&info.process_name),
-            json_escape(&info.command),
-            json_escape(&info.user),
-            info.state,
-            info.memory_bytes,
-            info.cpu_seconds,
-            info.children,
-        );
+        let docker_owners = docker_map.map(|map| {
+            map.get(&info.port)
+                .map(|owners| owners.as_slice())
+                .unwrap_or(&[][..])
+        });
+        json.push_str(&port_info_json(info, docker_owners));
     }
-    println!("]");
+    json.push_str("]\n");
+    io::stdout().write_all(json.as_bytes())
 }
 
 // ── Watch-mode helpers (JSON watch only) ─────────────────────────────
@@ -989,93 +1179,176 @@ fn get_terminal_width() -> Option<u16> {
     crossterm::terminal::size().ok().map(|(w, _)| w)
 }
 
+#[derive(Debug, Clone)]
+struct RunConfig {
+    target: Option<String>,
+    force: bool,
+    all: bool,
+    json: bool,
+    docker: bool,
+    watch: bool,
+    wide: bool,
+}
+
+impl RunConfig {
+    fn from_legacy(cli: &Cli) -> Self {
+        Self {
+            target: cli.target.clone(),
+            force: cli.force,
+            all: cli.all,
+            json: cli.json,
+            docker: cli.docker,
+            watch: cli.watch,
+            wide: cli.wide,
+        }
+    }
+}
+
+fn run_kill_mode(port: u16, force: bool, docker: bool, use_color: bool) {
+    let infos = get_port_infos(false);
+    let matches: Vec<&PortInfo> = infos.iter().filter(|i| i.port == port).collect();
+    let docker_map = if docker {
+        Some(get_docker_port_map())
+    } else {
+        None
+    };
+
+    if matches.is_empty() {
+        eprintln!("No process found on port {}", port);
+        std::process::exit(1);
+    }
+
+    for info in matches {
+        display_detail(info, use_color);
+        if let Some(ref map) = docker_map {
+            display_docker_context(info.port, map, use_color);
+        }
+        do_kill(info.pid, force);
+    }
+}
+
+fn run_watch_mode(config: &RunConfig, no_color: bool, use_color: bool, colors: &ColorConfig) {
+    if config.json {
+        // JSON watch: emit one JSON array per tick, no terminal escapes
+        // Register signal/ctrl handler for clean exit
+        #[cfg(unix)]
+        unsafe {
+            libc::signal(
+                libc::SIGINT,
+                handle_sigint as *const () as libc::sighandler_t,
+            );
+        }
+        #[cfg(windows)]
+        unsafe {
+            windows_sys::Win32::System::Console::SetConsoleCtrlHandler(
+                Some(handle_ctrl),
+                1, // TRUE — add handler
+            );
+        }
+
+        while RUNNING.load(Ordering::SeqCst) {
+            if write_display_safe(config, use_color, colors).is_err() {
+                break; // broken pipe
+            }
+
+            for _ in 0..20 {
+                if !RUNNING.load(Ordering::SeqCst) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    } else {
+        // Interactive TUI mode
+        let has_env_colors = std::env::var("PORTVIEW_COLORS").is_ok();
+        let style_config = if no_color {
+            StyleConfig::default()
+        } else if has_env_colors {
+            StyleConfig::from_color_config(colors)
+        } else {
+            StyleConfig::btop_default()
+        };
+
+        if let Err(e) = tui::run_tui(
+            config.target.as_deref(),
+            config.all,
+            config.wide,
+            config.force,
+            no_color,
+            config.docker,
+            style_config,
+        ) {
+            eprintln!("TUI error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
 // ── Main ─────────────────────────────────────────────────────────────
 
 fn main() {
     let cli = Cli::parse();
-    let use_color = !cli.no_color && atty_stdout();
-
     let colors = ColorConfig::from_env();
 
+    if let Some(command) = &cli.command {
+        match command {
+            Command::Watch {
+                target,
+                all,
+                json,
+                docker,
+                force,
+                wide,
+                no_color,
+            } => {
+                let use_color = !no_color && atty_stdout();
+                let config = RunConfig {
+                    target: target.clone(),
+                    force: *force,
+                    all: *all,
+                    json: *json,
+                    docker: *docker,
+                    watch: true,
+                    wide: *wide,
+                };
+                run_watch_mode(&config, *no_color, use_color, &colors);
+                return;
+            }
+            Command::Kill {
+                port,
+                force,
+                docker,
+                no_color,
+            } => {
+                let use_color = !no_color && atty_stdout();
+                run_kill_mode(*port, *force, *docker, use_color);
+                return;
+            }
+        }
+    }
+
+    // Legacy flag/positional mode remains supported
+    let use_color = !cli.no_color && atty_stdout();
+    let config = RunConfig::from_legacy(&cli);
+
     // --watch + --kill is not allowed
-    if cli.watch && cli.kill.is_some() {
+    if config.watch && cli.kill.is_some() {
         eprintln!("error: --watch and --kill cannot be used together");
         std::process::exit(2);
     }
-
     // --kill mode (not compatible with watch)
     if let Some(port) = cli.kill {
-        let infos = get_port_infos(false);
-        let matches: Vec<&PortInfo> = infos.iter().filter(|i| i.port == port).collect();
-
-        if matches.is_empty() {
-            eprintln!("No process found on port {}", port);
-            std::process::exit(1);
-        }
-
-        for info in matches {
-            display_detail(info, use_color);
-            do_kill(info.pid, cli.force);
-        }
+        run_kill_mode(port, config.force, config.docker, use_color);
         return;
     }
 
-    if cli.watch {
-        if cli.json {
-            // JSON watch: emit one JSON array per tick, no terminal escapes
-            // Register signal/ctrl handler for clean exit
-            #[cfg(unix)]
-            unsafe {
-                libc::signal(
-                    libc::SIGINT,
-                    handle_sigint as *const () as libc::sighandler_t,
-                );
-            }
-            #[cfg(windows)]
-            unsafe {
-                windows_sys::Win32::System::Console::SetConsoleCtrlHandler(
-                    Some(handle_ctrl),
-                    1, // TRUE — add handler
-                );
-            }
-
-            while RUNNING.load(Ordering::SeqCst) {
-                if write_display_safe(&cli, use_color, &colors).is_err() {
-                    break; // broken pipe
-                }
-
-                for _ in 0..20 {
-                    if !RUNNING.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-            }
-        } else {
-            // Interactive TUI mode
-            let has_env_colors = std::env::var("PORTVIEW_COLORS").is_ok();
-            let style_config = if cli.no_color {
-                StyleConfig::no_color()
-            } else if has_env_colors {
-                StyleConfig::from_color_config(&colors)
-            } else {
-                StyleConfig::btop_default()
-            };
-
-            if let Err(e) = tui::run_tui(
-                cli.target.as_deref(),
-                cli.all,
-                cli.wide,
-                cli.force,
-                cli.no_color,
-                style_config,
-            ) {
-                eprintln!("TUI error: {}", e);
-                std::process::exit(1);
-            }
+    if config.watch {
+        run_watch_mode(&config, cli.no_color, use_color, &colors);
+    } else if let Err(err) = run_display(&config, use_color, &colors) {
+        if err.kind() != io::ErrorKind::BrokenPipe {
+            eprintln!("Failed to write output: {}", err);
+            std::process::exit(1);
         }
-    } else {
-        run_display(&cli, use_color, &colors);
     }
 }
 
@@ -1088,46 +1361,8 @@ fn compute_cmd_width(infos: &[PortInfo]) -> usize {
         return cols.saturating_sub(83).max(20);
     }
 
-    // Measure the max content width of each non-command column (min = header width)
-    let port_w = infos
-        .iter()
-        .map(|i| i.port.to_string().len())
-        .max()
-        .unwrap_or(0)
-        .max(4); // "PORT"
-    let proto_w = infos
-        .iter()
-        .map(|i| i.protocol.len())
-        .max()
-        .unwrap_or(0)
-        .max(5); // "PROTO"
-    let pid_w = infos
-        .iter()
-        .map(|i| i.pid.to_string().len())
-        .max()
-        .unwrap_or(0)
-        .max(3); // "PID"
-    let user_w = infos.iter().map(|i| i.user.len()).max().unwrap_or(0).max(4); // "USER"
-    let process_w = infos
-        .iter()
-        .map(|i| i.process_name.len())
-        .max()
-        .unwrap_or(0)
-        .max(7); // "PROCESS"
-    let uptime_w = infos
-        .iter()
-        .map(|i| format_uptime(i.start_time).len())
-        .max()
-        .unwrap_or(0)
-        .max(6); // "UPTIME"
-    let mem_w = infos
-        .iter()
-        .map(|i| format_bytes(i.memory_bytes).len())
-        .max()
-        .unwrap_or(0)
-        .max(3); // "MEM"
-
-    let data_width = port_w + proto_w + pid_w + user_w + process_w + uptime_w + mem_w;
+    let col_widths = measure_column_widths(infos);
+    let data_width: usize = col_widths.iter().sum();
 
     // Box-drawing style: 9 vertical borders + 1 space padding on each side of each of 8 columns
     let chrome = 9 + (8 * 2);
@@ -1136,21 +1371,31 @@ fn compute_cmd_width(infos: &[PortInfo]) -> usize {
 }
 
 /// Run display and catch broken pipe errors (for piped JSON watch mode).
-fn write_display_safe(cli: &Cli, use_color: bool, colors: &ColorConfig) -> io::Result<()> {
-    run_display(cli, use_color, colors);
+fn write_display_safe(config: &RunConfig, use_color: bool, colors: &ColorConfig) -> io::Result<()> {
+    run_display(config, use_color, colors)?;
     io::stdout().flush()
 }
 
-fn run_display(cli: &Cli, use_color: bool, colors: &ColorConfig) {
-    match cli.target.as_deref() {
+fn run_display(config: &RunConfig, use_color: bool, colors: &ColorConfig) -> io::Result<()> {
+    let docker_map = if config.docker {
+        Some(get_docker_port_map())
+    } else {
+        None
+    };
+
+    match config.target.as_deref() {
         None | Some("scan") => {
             // Default: show table of listening ports
-            let mut infos = get_port_infos(!cli.all);
-            if cli.json {
-                display_json(&infos);
+            let mut infos = get_port_infos(!config.all);
+            if let Some(ref map) = docker_map {
+                annotate_infos_with_docker(&mut infos, map);
+                infos.extend(synthesize_docker_entries(&infos, map));
+            }
+            if config.json {
+                display_json(&infos, docker_map.as_ref())?;
             } else {
                 let cmd_width = compute_cmd_width(&infos);
-                if !cli.wide {
+                if !config.wide {
                     for info in &mut infos {
                         info.command = truncate_cmd(&info.command, cmd_width);
                     }
@@ -1168,12 +1413,13 @@ fn run_display(cli: &Cli, use_color: bool, colors: &ColorConfig) {
                         true,
                     );
                 }
-                display_table(&infos, use_color, colors, cli.wide, cmd_width);
-                if use_color && !infos.is_empty() && !cli.watch {
+                display_table(&infos, use_color, colors, config.wide, cmd_width);
+                if use_color && !infos.is_empty() && !config.watch {
                     let mut out = io::stdout();
+                    write_styled(&mut out, "  Inspect: portview <port>\n", "dimmed", true);
                     write_styled(
                         &mut out,
-                        "  Inspect a port: portview <port>\n",
+                        "  Watch:   portview watch [target] --docker\n",
                         "dimmed",
                         true,
                     );
@@ -1183,11 +1429,18 @@ fn run_display(cli: &Cli, use_color: bool, colors: &ColorConfig) {
         Some(target) => {
             // Try to parse as port number
             if let Ok(port) = target.parse::<u16>() {
-                let infos = get_port_infos(false);
+                let mut infos = get_port_infos(false);
+                if let Some(ref map) = docker_map {
+                    infos.extend(
+                        synthesize_docker_entries(&infos, map)
+                            .into_iter()
+                            .filter(|i| i.port == port),
+                    );
+                }
                 let matches: Vec<&PortInfo> = infos.iter().filter(|i| i.port == port).collect();
 
                 if matches.is_empty() {
-                    if cli.json {
+                    if config.json {
                         println!("[]");
                     } else {
                         let mut out = io::stdout();
@@ -1201,28 +1454,40 @@ fn run_display(cli: &Cli, use_color: bool, colors: &ColorConfig) {
                             let _ = writeln!(out, "\n  Nothing on port {}", port);
                         }
                     }
-                    if !cli.watch {
+                    if !config.watch {
                         std::process::exit(1);
                     }
-                    return;
+                    return Ok(());
                 }
 
-                if cli.json {
+                if config.json {
                     let owned: Vec<PortInfo> = matches.into_iter().cloned().collect();
-                    display_json(&owned);
+                    display_json(&owned, docker_map.as_ref())?;
                 } else {
                     for info in &matches {
                         display_detail(info, use_color);
+                        if let Some(ref map) = docker_map {
+                            display_docker_context(info.port, map, use_color);
+                        }
                     }
 
-                    // Offer to kill interactively (only when NOT watching)
-                    if !cli.watch && matches.len() == 1 && atty_stdout() && atty_stdin() {
-                        prompt_kill(matches[0].pid, cli.force);
+                    // Offer to kill interactively (only when NOT watching, not synthetic)
+                    if !config.watch
+                        && matches.len() == 1
+                        && matches[0].pid != 0
+                        && atty_stdout()
+                        && atty_stdin()
+                    {
+                        prompt_kill(matches[0].pid, config.force);
                     }
                 }
             } else {
                 // Search by process name — filter on full command, then truncate for display
-                let mut infos = get_port_infos(!cli.all);
+                let mut infos = get_port_infos(!config.all);
+                if let Some(ref map) = docker_map {
+                    annotate_infos_with_docker(&mut infos, map);
+                    infos.extend(synthesize_docker_entries(&infos, map));
+                }
                 let target_lower = target.to_lowercase();
                 let mut matches: Vec<PortInfo> = infos
                     .drain(..)
@@ -1243,14 +1508,14 @@ fn run_display(cli: &Cli, use_color: bool, colors: &ColorConfig) {
                     } else {
                         let _ = writeln!(out, "\n  No ports found for '{}'", target);
                     }
-                    if !cli.watch {
+                    if !config.watch {
                         std::process::exit(1);
                     }
-                } else if cli.json {
-                    display_json(&matches);
+                } else if config.json {
+                    display_json(&matches, docker_map.as_ref())?;
                 } else {
                     let cmd_width = compute_cmd_width(&matches);
-                    if !cli.wide {
+                    if !config.wide {
                         for info in &mut matches {
                             info.command = truncate_cmd(&info.command, cmd_width);
                         }
@@ -1272,11 +1537,13 @@ fn run_display(cli: &Cli, use_color: bool, colors: &ColorConfig) {
                         let _ = writeln!(out, "'");
                     }
 
-                    display_table(&matches, use_color, colors, cli.wide, cmd_width);
+                    display_table(&matches, use_color, colors, config.wide, cmd_width);
                 }
             }
         }
     }
+
+    Ok(())
 }
 
 fn atty_stdout() -> bool {
@@ -1291,6 +1558,12 @@ fn atty_stdin() -> bool {
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn short_container_id_truncates_to_12() {
+        assert_eq!(short_container_id("0123456789abcdef"), "0123456789ab");
+        assert_eq!(short_container_id("shortid"), "shortid");
+    }
 
     // ── kill_process ────────────────────────────────────────────────
 

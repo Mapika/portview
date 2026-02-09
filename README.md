@@ -5,7 +5,7 @@
 
 See what's on your ports, then act on it.
 
-A diagnostic-first port viewer for Linux, macOS, and Windows. No more `lsof -i :3000 | grep LISTEN` incantations. One command shows you what's listening, who owns it, how long it's been running, and offers to kill it if you want.
+A diagnostic-first port viewer for Linux, macOS, and Windows. No more `lsof -i :3000 | grep LISTEN` incantations. One command shows you what's listening, who owns it, how long it's been running, and offers to kill it if you want. Optional Docker-aware diagnostics are available with `--docker`.
 
 ~960 KB single binary. Zero runtime dependencies.
 
@@ -42,6 +42,9 @@ cargo install portview
 **Manual**: grab the binary from [Releases](https://github.com/mapika/portview/releases), `chmod +x`, drop in PATH.
 
 ## Usage
+
+Preferred CLI style uses subcommands (`watch`, `kill`).
+Legacy flags (`--watch`, `--kill`) are still supported.
 
 ### Show all listening ports
 
@@ -87,22 +90,34 @@ $ portview python
 ╰──────┴───────┴───────┴──────┴─────────┴────────┴───────┴──────────────────────────────────╯
 ```
 
+### Docker-aware annotations
+
+```bash
+portview --docker
+portview --docker 3000
+portview --docker --json
+```
+
+When Docker is running, `--docker` annotates output with container ownership (`[docker:<container>]`) and includes a `docker` array per row in JSON mode.
+
 ### Kill directly
 
 ```bash
-portview -k 3000          # SIGTERM (Unix) / TerminateProcess (Windows)
-portview -k 3000 --force  # SIGKILL (Unix) / TerminateProcess (Windows)
+portview kill 3000          # SIGTERM (Unix) / TerminateProcess (Windows)
+portview kill 3000 --force  # SIGKILL (Unix) / TerminateProcess (Windows)
 ```
 
-> **Note:** On Windows, `--kill` always force-terminates the process via `TerminateProcess`. There is no graceful shutdown equivalent to Unix SIGTERM.
+> **Note:** On Windows, `portview kill` always force-terminates the process via `TerminateProcess`. There is no graceful shutdown equivalent to Unix SIGTERM.
 
 ### Watch mode (interactive TUI)
 
 ```bash
-portview --watch            # interactive TUI, refreshes every 1s
-portview -w 3000            # watch a specific port
-portview -w node            # watch filtered by process name
-portview -w --json          # streaming JSON, useful for piping
+portview watch            # interactive TUI, refreshes every 1s
+portview watch 3000       # watch a specific port
+portview watch node       # watch filtered by process name
+portview watch --docker   # interactive TUI with Docker context
+portview watch --json     # streaming JSON, useful for piping
+portview watch --json --docker # streaming JSON with Docker ownership
 ```
 
 Watch mode opens an interactive TUI with a scrollable table, row selection, filtering, and kill confirmation.
@@ -134,12 +149,14 @@ Watch mode opens an interactive TUI with a scrollable table, row selection, filt
 
 **Kill popup:** `y`/`Enter` to confirm, `n`/`Esc` to cancel.
 
-Use `--watch --json` for non-interactive streaming JSON output (no TUI).
+Use `watch --json` for non-interactive streaming JSON output (no TUI).
+With `--docker`, watch mode shows mapped container hints in the table and full Docker mapping details in the detail view.
 
 ### JSON output
 
 ```bash
 portview --json | jq '.[] | select(.process == "node")'
+portview --docker --json | jq '.[] | {port, process, docker}'
 ```
 
 ### Show all connections (not just listening)
@@ -180,7 +197,8 @@ For each listening port:
 | CPU time | `/proc/<pid>/stat` utime + stime | `proc_pidinfo` total user + system | `GetProcessTimes` kernel + user |
 | Child count | `/proc/<pid>/task/<pid>/children` | `proc_listchildpids` | `CreateToolhelp32Snapshot` |
 
-Everything is read directly from the OS. No shelling out to `lsof`, `ss`, `netstat`, or `netsh`.
+Core process/port data is read directly from the OS. No shelling out to `lsof`, `ss`, `netstat`, or `netsh`.
+When Docker-aware mode is enabled (`--docker`), ownership is collected from `docker ps`.
 
 ## Why not...
 
@@ -207,7 +225,8 @@ cp target/release/portview /usr/local/bin/
 
 - **Linux:** Needs read access to `/proc/<pid>/fd/` for inode→pid mapping. Processes owned by other users are hidden without `sudo`.
 - **macOS:** Processes owned by other users may not be visible without `sudo`.
-- **Windows:** Some system/protected processes may not be accessible. `--kill` always force-terminates (no graceful SIGTERM equivalent). Run as Administrator to see all processes.
+- **Windows:** Some system/protected processes may not be accessible. `portview kill` always force-terminates (no graceful SIGTERM equivalent). Run as Administrator to see all processes.
+- **Docker integration:** `--docker` requires the `docker` CLI and access to the Docker daemon.
 
 ## License
 
