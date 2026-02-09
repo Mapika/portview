@@ -462,6 +462,9 @@ fn build_footer_line(app: &App) -> Line<'_> {
 fn render(frame: &mut ratatui::Frame, app: &mut App) {
     let area = frame.area();
 
+    // Clear entire frame to prevent popup artifacts
+    frame.render_widget(Clear, area);
+
     let title_line = build_title_line(app);
     let footer_line = build_footer_line(app);
 

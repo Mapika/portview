@@ -650,7 +650,12 @@ fn display_table(
         let _ = write!(out, "│");
         for (i, (&w, val)) in widths.iter().zip(values.iter()).enumerate() {
             let _ = write!(out, " ");
-            let padded = format!("{:<width$}", val, width = w);
+            // Right-align UPTIME (5) and MEM (6) columns
+            let padded = if i == 5 || i == 6 {
+                format!("{:>width$}", val, width = w)
+            } else {
+                format!("{:<width$}", val, width = w)
+            };
             write_styled(&mut out, &padded, color_names[i], use_color);
             let _ = write!(out, " │");
         }
