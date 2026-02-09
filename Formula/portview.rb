@@ -7,20 +7,20 @@ class Portview < Formula
   on_linux do
     if Hardware::CPU.intel?
       url "https://github.com/mapika/portview/releases/download/v#{version}/portview-linux-x86_64.tar.gz"
-      sha256 "c136d661497433c299ee4830249e86aa66c4a2e569bbd33fcd3e595690afe0e4"
+      sha256 "e56c62095de0899a47bd6dfc659a2f09df315a2d38561bffabea84737ab64ff2"
     elsif Hardware::CPU.arm?
       url "https://github.com/mapika/portview/releases/download/v#{version}/portview-linux-aarch64.tar.gz"
-      sha256 "75a2e08e71e9c24e3222e72c02dd4a246b582bb3c40d2d3e116e72d101eb70bd"
+      sha256 "31bccb548d3aa8eb4ef502ab1a3ec70f0e2e43b90107a1f72a68cd7425840824"
     end
   end
 
   on_macos do
     if Hardware::CPU.intel?
       url "https://github.com/mapika/portview/releases/download/v#{version}/portview-darwin-x86_64.tar.gz"
-      sha256 "2079a915ee5606b5ec98bc5924e371106383521327b0af3f6c12a42bf710d4d8"
+      sha256 "3d22853c28f359f44cb7bbeb9230a0f48265350e82812254effa4161a033a755"
     elsif Hardware::CPU.arm?
       url "https://github.com/mapika/portview/releases/download/v#{version}/portview-darwin-aarch64.tar.gz"
-      sha256 "8e8d20342d71072e382d91692090d6d1c650d5e002fdce24795435010d902b9a"
+      sha256 "fa02d752cf8f88aa809f0ca7854e4a03e525a3a10b300817a9e0eaabf1607b5c"
     end
   end
 
