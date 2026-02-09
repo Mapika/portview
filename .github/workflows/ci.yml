@@ -19,6 +19,9 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-14
             name: darwin-aarch64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: windows-x86_64
 
     runs-on: ${{ matrix.os }}
 
@@ -33,7 +36,15 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Smoke test
+      - name: Smoke test (Unix)
+        if: runner.os != 'Windows'
         run: |
           ./target/${{ matrix.target }}/release/portview --version
           ./target/${{ matrix.target }}/release/portview || true
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          .\target\${{ matrix.target }}\release\portview.exe --version
+          .\target\${{ matrix.target }}\release\portview.exe ; exit 0
+        shell: pwsh

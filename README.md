@@ -2,7 +2,7 @@
 
 See what's on your ports, then act on it.
 
-A diagnostic-first port viewer for Linux and macOS. No more `lsof -i :3000 | grep LISTEN` incantations. One command shows you what's listening, who owns it, how long it's been running, and offers to kill it if you want.
+A diagnostic-first port viewer for Linux, macOS, and Windows. No more `lsof -i :3000 | grep LISTEN` incantations. One command shows you what's listening, who owns it, how long it's been running, and offers to kill it if you want.
 
 ~930 KB single binary. Zero runtime dependencies.
 
@@ -16,6 +16,12 @@ A diagnostic-first port viewer for Linux and macOS. No more `lsof -i :3000 | gre
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mapika/portview/main/install.sh | sh
+```
+
+**PowerShell** (Windows):
+
+```powershell
+irm https://raw.githubusercontent.com/mapika/portview/main/install.ps1 | iex
 ```
 
 **Homebrew**:
@@ -81,9 +87,11 @@ $ portview python
 ### Kill directly
 
 ```bash
-portview -k 3000          # SIGTERM
-portview -k 3000 --force  # SIGKILL
+portview -k 3000          # SIGTERM (Unix) / TerminateProcess (Windows)
+portview -k 3000 --force  # SIGKILL (Unix) / TerminateProcess (Windows)
 ```
+
+> **Note:** On Windows, `--kill` always force-terminates the process via `TerminateProcess`. There is no graceful shutdown equivalent to Unix SIGTERM.
 
 ### Watch mode (live refresh)
 
@@ -128,19 +136,19 @@ Use `--no-color` to disable all colors.
 
 For each listening port:
 
-| Field | Linux source | macOS source |
-|-------|-------------|--------------|
-| Port & protocol | `/proc/net/tcp`, `/proc/net/udp` | `proc_pidfdinfo` |
-| PID | inode→pid mapping via `/proc/*/fd/` | `proc_listpids` |
-| Process name | `/proc/<pid>/comm` | `proc_pidpath` |
-| Full command | `/proc/<pid>/cmdline` | `proc_pidpath` |
-| User | `/proc/<pid>/status` → `getpwuid` | `proc_pidinfo` → `getpwuid` |
-| Uptime | `/proc/<pid>/stat` starttime + btime | `proc_pidinfo` start time |
-| RSS memory | `/proc/<pid>/status` VmRSS | `proc_pidinfo` resident size |
-| CPU time | `/proc/<pid>/stat` utime + stime | `proc_pidinfo` total user + system |
-| Child count | `/proc/<pid>/task/<pid>/children` | `proc_listchildpids` |
+| Field | Linux source | macOS source | Windows source |
+|-------|-------------|--------------|----------------|
+| Port & protocol | `/proc/net/tcp`, `/proc/net/udp` | `proc_pidfdinfo` | `GetExtendedTcpTable` / `GetExtendedUdpTable` |
+| PID | inode→pid mapping via `/proc/*/fd/` | `proc_listpids` | Included in socket table |
+| Process name | `/proc/<pid>/comm` | `proc_pidpath` | `QueryFullProcessImageNameW` |
+| Full command | `/proc/<pid>/cmdline` | `proc_pidpath` | `QueryFullProcessImageNameW` |
+| User | `/proc/<pid>/status` → `getpwuid` | `proc_pidinfo` → `getpwuid` | `OpenProcessToken` → `LookupAccountSidW` |
+| Uptime | `/proc/<pid>/stat` starttime + btime | `proc_pidinfo` start time | `GetProcessTimes` |
+| RSS memory | `/proc/<pid>/status` VmRSS | `proc_pidinfo` resident size | `K32GetProcessMemoryInfo` WorkingSetSize |
+| CPU time | `/proc/<pid>/stat` utime + stime | `proc_pidinfo` total user + system | `GetProcessTimes` kernel + user |
+| Child count | `/proc/<pid>/task/<pid>/children` | `proc_listchildpids` | `CreateToolhelp32Snapshot` |
 
-Everything is read directly from the OS. No shelling out to `lsof`, `ss`, or `netstat`.
+Everything is read directly from the OS. No shelling out to `lsof`, `ss`, `netstat`, or `netsh`.
 
 ## Why not...
 
@@ -165,9 +173,9 @@ cp target/release/portview /usr/local/bin/
 
 ## Limitations
 
-- Linux and macOS only. Windows is not supported.
 - **Linux:** Needs read access to `/proc/<pid>/fd/` for inode→pid mapping. Some processes owned by other users may require `sudo`.
 - **macOS:** Some processes owned by other users may not be visible without `sudo`.
+- **Windows:** Some system/protected processes may not be accessible. `--kill` always force-terminates (no graceful SIGTERM equivalent). Run as Administrator to see all processes.
 
 ## License
 

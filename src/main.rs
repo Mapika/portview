@@ -18,8 +18,13 @@ mod macos;
 #[cfg(target_os = "macos")]
 use macos::get_port_infos;
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-compile_error!("portview only supports Linux and macOS");
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+use windows::get_port_infos;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+compile_error!("portview only supports Linux, macOS, and Windows");
 
 // ── CLI ──────────────────────────────────────────────────────────────
 
@@ -135,6 +140,26 @@ impl TcpState {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    pub(crate) fn from_mib(state: u32) -> Self {
+        // MIB_TCP_STATE_* from iprtrmib.h
+        match state {
+            1 => TcpState::Close,       // MIB_TCP_STATE_CLOSED
+            2 => TcpState::Listen,      // MIB_TCP_STATE_LISTEN
+            3 => TcpState::SynSent,     // MIB_TCP_STATE_SYN_SENT
+            4 => TcpState::SynRecv,     // MIB_TCP_STATE_SYN_RCVD
+            5 => TcpState::Established, // MIB_TCP_STATE_ESTAB
+            6 => TcpState::FinWait1,    // MIB_TCP_STATE_FIN_WAIT1
+            7 => TcpState::FinWait2,    // MIB_TCP_STATE_FIN_WAIT2
+            8 => TcpState::CloseWait,   // MIB_TCP_STATE_CLOSE_WAIT
+            9 => TcpState::Closing,     // MIB_TCP_STATE_CLOSING
+            10 => TcpState::LastAck,    // MIB_TCP_STATE_LAST_ACK
+            11 => TcpState::TimeWait,   // MIB_TCP_STATE_TIME_WAIT
+            12 => TcpState::Close,      // MIB_TCP_STATE_DELETE_TCB
+            _ => TcpState::Unknown,
+        }
+    }
+
     fn as_str(&self) -> &'static str {
         match self {
             TcpState::Listen => "LISTEN",
@@ -181,6 +206,7 @@ struct TableRow {
 
 // ── Shared helpers ───────────────────────────────────────────────────
 
+#[cfg(unix)]
 pub(crate) fn get_username(uid: u32) -> String {
     let mut buf = vec![0u8; 1024];
     let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
@@ -491,6 +517,7 @@ fn prompt_kill(pid: u32, force: bool) -> bool {
     false
 }
 
+#[cfg(unix)]
 fn do_kill(pid: u32, force: bool) {
     // Guard against special PIDs and overflow on cast to i32
     if pid == 0 {
@@ -531,6 +558,56 @@ fn do_kill(pid: u32, force: bool) {
             pid,
             err
         );
+    }
+}
+
+#[cfg(windows)]
+fn do_kill(pid: u32, _force: bool) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+    };
+
+    if pid == 0 {
+        eprintln!(
+            "  {} Refusing to terminate PID 0",
+            "✗".red().bold(),
+        );
+        return;
+    }
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if handle.is_null() {
+            let err = io::Error::last_os_error();
+            eprintln!(
+                "  {} Failed to open PID {}: {}",
+                "✗".red().bold(),
+                pid,
+                err
+            );
+            return;
+        }
+
+        // Windows has no graceful SIGTERM equivalent — always force-terminates
+        let result = TerminateProcess(handle, 1);
+        CloseHandle(handle);
+
+        if result != 0 {
+            println!(
+                "  {} Terminated PID {}",
+                "✓".green().bold(),
+                pid
+            );
+        } else {
+            let err = io::Error::last_os_error();
+            eprintln!(
+                "  {} Failed to terminate PID {}: {}",
+                "✗".red().bold(),
+                pid,
+                err
+            );
+        }
     }
 }
 
@@ -609,8 +686,20 @@ fn show_cursor() {
     let _ = io::stdout().flush();
 }
 
+#[cfg(unix)]
 extern "C" fn handle_sigint(_sig: libc::c_int) {
     RUNNING.store(false, Ordering::SeqCst);
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn handle_ctrl(ctrl_type: u32) -> i32 {
+    // CTRL_C_EVENT = 0, CTRL_BREAK_EVENT = 1
+    if ctrl_type == 0 || ctrl_type == 1 {
+        RUNNING.store(false, Ordering::SeqCst);
+        1 // TRUE — handled
+    } else {
+        0 // FALSE — pass to next handler
+    }
 }
 
 fn print_watch_footer(use_color: bool) {
@@ -623,6 +712,7 @@ fn print_watch_footer(use_color: bool) {
     }
 }
 
+#[cfg(unix)]
 fn chrono_free_time() -> String {
     // Get wall-clock HH:MM:SS without pulling in chrono
     let secs_since_epoch = SystemTime::now()
@@ -646,8 +736,18 @@ fn chrono_free_time() -> String {
     format!("{:02}:{:02}:{:02}", h, m, s)
 }
 
+#[cfg(windows)]
+fn chrono_free_time() -> String {
+    use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+
+    let mut st = unsafe { std::mem::zeroed::<windows_sys::Win32::Foundation::SYSTEMTIME>() };
+    unsafe { GetLocalTime(&mut st) };
+    format!("{:02}:{:02}:{:02}", st.wHour, st.wMinute, st.wSecond)
+}
+
 // ── Terminal helpers ──────────────────────────────────────────────────
 
+#[cfg(unix)]
 fn get_terminal_width() -> Option<u16> {
     unsafe {
         let mut winsize: libc::winsize = std::mem::zeroed();
@@ -655,6 +755,32 @@ fn get_terminal_width() -> Option<u16> {
             && winsize.ws_col > 0
         {
             Some(winsize.ws_col)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(windows)]
+fn get_terminal_width() -> Option<u16> {
+    use windows_sys::Win32::System::Console::{
+        GetConsoleScreenBufferInfo, GetStdHandle, CONSOLE_SCREEN_BUFFER_INFO,
+        STD_OUTPUT_HANDLE,
+    };
+
+    unsafe {
+        let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        if handle.is_null() {
+            return None;
+        }
+        let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
+        if GetConsoleScreenBufferInfo(handle, &mut info) != 0 {
+            let width = info.srWindow.Right - info.srWindow.Left + 1;
+            if width > 0 {
+                Some(width as u16)
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -697,9 +823,17 @@ fn main() {
     }
 
     if cli.watch {
-        // Register SIGINT handler for clean exit
+        // Register signal/ctrl handler for clean exit
+        #[cfg(unix)]
         unsafe {
             libc::signal(libc::SIGINT, handle_sigint as libc::sighandler_t);
+        }
+        #[cfg(windows)]
+        unsafe {
+            windows_sys::Win32::System::Console::SetConsoleCtrlHandler(
+                Some(handle_ctrl),
+                1, // TRUE — add handler
+            );
         }
         enter_alt_screen();
         hide_cursor();
