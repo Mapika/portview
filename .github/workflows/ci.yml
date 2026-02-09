@@ -6,7 +6,41 @@ on:
     branches: [main]
 
 jobs:
+  quality:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Security audit
+        run: cargo audit
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Shellcheck
+        run: shellcheck install.sh
+
   build:
+    needs: quality
+
     strategy:
       matrix:
         include:
@@ -19,6 +53,9 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-14
             name: darwin-aarch64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: windows-x86_64
 
     runs-on: ${{ matrix.os }}
 
@@ -33,7 +70,15 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Smoke test
+      - name: Smoke test (Unix)
+        if: runner.os != 'Windows'
         run: |
           ./target/${{ matrix.target }}/release/portview --version
           ./target/${{ matrix.target }}/release/portview || true
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          .\target\${{ matrix.target }}\release\portview.exe --version
+          .\target\${{ matrix.target }}\release\portview.exe ; exit 0
+        shell: pwsh

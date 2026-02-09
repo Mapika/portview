@@ -15,7 +15,7 @@
         packages = rec {
           portview = pkgs.rustPlatform.buildRustPackage {
             pname = "portview";
-            version = "0.4.1";
+            version = "0.6.0";
 
             src = self;
 

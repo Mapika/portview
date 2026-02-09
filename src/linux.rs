@@ -86,7 +86,7 @@ fn parse_proc_net(path: &str, protocol: &str, ipv6: bool) -> Vec<SocketEntry> {
             let (remote_addr, remote_port) = parse_addr_port(fields[2], ipv6);
             let state = if is_udp {
                 match fields[3] {
-                    "07" => TcpState::Listen, // UDP bound/receiving
+                    "07" => TcpState::Listen,      // UDP bound/receiving
                     "01" => TcpState::Established, // UDP connected via connect()
                     _ => TcpState::Unknown,
                 }
@@ -147,7 +147,10 @@ fn build_inode_to_pid_map() -> HashMap<u64, u32> {
                 Err(_) => continue,
             };
             let link_str = link.to_string_lossy();
-            if let Some(inode_str) = link_str.strip_prefix("socket:[").and_then(|s| s.strip_suffix(']')) {
+            if let Some(inode_str) = link_str
+                .strip_prefix("socket:[")
+                .and_then(|s| s.strip_suffix(']'))
+            {
                 if let Ok(inode) = inode_str.parse::<u64>() {
                     map.insert(inode, pid);
                 }
@@ -189,9 +192,19 @@ fn parse_proc_status(pid: u32) -> (u32, u64) {
     let mut rss_bytes = 0u64;
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("Uid:") {
-            uid = rest.split_whitespace().next().unwrap_or("0").parse().unwrap_or(0);
+            uid = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0);
         } else if let Some(rest) = line.strip_prefix("VmRSS:") {
-            let kb: u64 = rest.split_whitespace().next().unwrap_or("0").parse().unwrap_or(0);
+            let kb: u64 = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0);
             rss_bytes = kb * 1024;
         }
     }
@@ -244,8 +257,8 @@ fn parse_proc_stat(pid: u32, boot_time: u64, clock_ticks: u64) -> (Option<System
 }
 
 fn count_children(pid: u32) -> u32 {
-    let children = fs::read_to_string(format!("/proc/{}/task/{}/children", pid, pid))
-        .unwrap_or_default();
+    let children =
+        fs::read_to_string(format!("/proc/{}/task/{}/children", pid, pid)).unwrap_or_default();
     children.split_whitespace().count() as u32
 }
 
@@ -281,7 +294,11 @@ pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
 
         infos.push(PortInfo {
             port: sock.local_port,
-            protocol: sock.protocol.strip_suffix('6').unwrap_or(&sock.protocol).to_string(),
+            protocol: sock
+                .protocol
+                .strip_suffix('6')
+                .unwrap_or(&sock.protocol)
+                .to_string(),
             pid,
             process_name: get_process_name(pid),
             command: get_process_cmdline(pid),
@@ -295,11 +312,118 @@ pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
         });
     }
 
-    // Sort by port number
-    infos.sort_by(|a, b| a.port.cmp(&b.port).then_with(|| a.protocol.cmp(&b.protocol)));
+    // Sort by port number, then protocol, then pid (pid needed for dedup_by adjacency)
+    infos.sort_by(|a, b| {
+        a.port
+            .cmp(&b.port)
+            .then_with(|| a.protocol.cmp(&b.protocol))
+            .then_with(|| a.pid.cmp(&b.pid))
+    });
 
-    // Deduplicate (same port+proto can appear for v4 and v6)
+    // Deduplicate (same port+proto+pid can appear for v4 and v6)
     infos.dedup_by(|a, b| a.port == b.port && a.protocol == b.protocol && a.pid == b.pid);
 
     infos
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── parse_hex_addr_v4 ───────────────────────────────────────────
+
+    #[test]
+    fn parse_hex_addr_v4_loopback() {
+        // 0100007F = 127.0.0.1 in little-endian hex
+        let addr = parse_hex_addr_v4("0100007F");
+        assert_eq!(addr, IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+    }
+
+    #[test]
+    fn parse_hex_addr_v4_unspecified() {
+        let addr = parse_hex_addr_v4("00000000");
+        assert_eq!(addr, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    }
+
+    #[test]
+    fn parse_hex_addr_v4_192_168_1_1() {
+        // 0101A8C0 = 192.168.1.1 in little-endian hex
+        let addr = parse_hex_addr_v4("0101A8C0");
+        assert_eq!(addr, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
+    }
+
+    #[test]
+    fn parse_hex_addr_v4_broadcast() {
+        let addr = parse_hex_addr_v4("FFFFFFFF");
+        assert_eq!(addr, IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255)));
+    }
+
+    #[test]
+    fn parse_hex_addr_v4_invalid_hex() {
+        let addr = parse_hex_addr_v4("ZZZZZZZZ");
+        assert_eq!(addr, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    }
+
+    // ── parse_hex_addr_v6 ───────────────────────────────────────────
+
+    #[test]
+    fn parse_hex_addr_v6_unspecified() {
+        let addr = parse_hex_addr_v6("00000000000000000000000000000000");
+        assert_eq!(addr, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+    }
+
+    #[test]
+    fn parse_hex_addr_v6_loopback() {
+        // ::1 in Linux /proc format (4 groups of LE 32-bit words)
+        let addr = parse_hex_addr_v6("00000000000000000000000001000000");
+        assert_eq!(addr, IpAddr::V6(Ipv6Addr::LOCALHOST));
+    }
+
+    #[test]
+    fn parse_hex_addr_v6_short_input() {
+        let addr = parse_hex_addr_v6("0000");
+        assert_eq!(addr, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+    }
+
+    #[test]
+    fn parse_hex_addr_v6_empty() {
+        let addr = parse_hex_addr_v6("");
+        assert_eq!(addr, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+    }
+
+    // ── parse_addr_port ─────────────────────────────────────────────
+
+    #[test]
+    fn parse_addr_port_v4_loopback_80() {
+        let (addr, port) = parse_addr_port("0100007F:0050", false);
+        assert_eq!(addr, IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+        assert_eq!(port, 80);
+    }
+
+    #[test]
+    fn parse_addr_port_v6_any_443() {
+        let (addr, port) = parse_addr_port("00000000000000000000000000000000:01BB", true);
+        assert_eq!(addr, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+        assert_eq!(port, 443);
+    }
+
+    #[test]
+    fn parse_addr_port_no_colon_v4() {
+        let (addr, port) = parse_addr_port("nocolon", false);
+        assert_eq!(addr, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(port, 0);
+    }
+
+    #[test]
+    fn parse_addr_port_no_colon_v6() {
+        let (addr, port) = parse_addr_port("nocolon", true);
+        assert_eq!(addr, IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+        assert_eq!(port, 0);
+    }
+
+    #[test]
+    fn parse_addr_port_bad_port() {
+        let (_, port) = parse_addr_port("0100007F:ZZZZ", false);
+        assert_eq!(port, 0);
+    }
 }

@@ -16,7 +16,7 @@ ARCH="$(uname -m)"
 case "$OS" in
     Linux)  os="linux" ;;
     Darwin) os="darwin" ;;
-    *)      echo "Error: portview only supports Linux and macOS."; exit 1 ;;
+    *)      echo "Error: This installer supports Linux and macOS. For Windows, use install.ps1."; exit 1 ;;
 esac
 
 case "$ARCH" in

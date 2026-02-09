@@ -18,8 +18,13 @@ mod macos;
 #[cfg(target_os = "macos")]
 use macos::get_port_infos;
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-compile_error!("portview only supports Linux and macOS");
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+use windows::get_port_infos;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+compile_error!("portview only supports Linux, macOS, and Windows");
 
 // ── CLI ──────────────────────────────────────────────────────────────
 
@@ -135,6 +140,26 @@ impl TcpState {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    pub(crate) fn from_mib(state: u32) -> Self {
+        // MIB_TCP_STATE_* from iprtrmib.h
+        match state {
+            1 => TcpState::Close,       // MIB_TCP_STATE_CLOSED
+            2 => TcpState::Listen,      // MIB_TCP_STATE_LISTEN
+            3 => TcpState::SynSent,     // MIB_TCP_STATE_SYN_SENT
+            4 => TcpState::SynRecv,     // MIB_TCP_STATE_SYN_RCVD
+            5 => TcpState::Established, // MIB_TCP_STATE_ESTAB
+            6 => TcpState::FinWait1,    // MIB_TCP_STATE_FIN_WAIT1
+            7 => TcpState::FinWait2,    // MIB_TCP_STATE_FIN_WAIT2
+            8 => TcpState::CloseWait,   // MIB_TCP_STATE_CLOSE_WAIT
+            9 => TcpState::Closing,     // MIB_TCP_STATE_CLOSING
+            10 => TcpState::LastAck,    // MIB_TCP_STATE_LAST_ACK
+            11 => TcpState::TimeWait,   // MIB_TCP_STATE_TIME_WAIT
+            12 => TcpState::Close,      // MIB_TCP_STATE_DELETE_TCB
+            _ => TcpState::Unknown,
+        }
+    }
+
     fn as_str(&self) -> &'static str {
         match self {
             TcpState::Listen => "LISTEN",
@@ -181,6 +206,7 @@ struct TableRow {
 
 // ── Shared helpers ───────────────────────────────────────────────────
 
+#[cfg(unix)]
 pub(crate) fn get_username(uid: u32) -> String {
     let mut buf = vec![0u8; 1024];
     let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
@@ -412,7 +438,13 @@ fn to_table_row(info: &PortInfo, colors: &ColorConfig) -> TableRow {
     }
 }
 
-fn display_table(infos: &[PortInfo], use_color: bool, colors: &ColorConfig, wide: bool, cmd_width: usize) {
+fn display_table(
+    infos: &[PortInfo],
+    use_color: bool,
+    colors: &ColorConfig,
+    wide: bool,
+    cmd_width: usize,
+) {
     if infos.is_empty() {
         if use_color {
             println!("{}", "No listening ports found.".dimmed());
@@ -457,7 +489,14 @@ fn display_detail(info: &PortInfo, use_color: bool) {
         ("Bind:", bind_str),
         ("Command:", info.command.clone()),
         ("User:", info.user.clone()),
-        ("Started:", if use_color { uptime.clone() } else { format!("{} ago", uptime) }),
+        (
+            "Started:",
+            if use_color {
+                uptime.clone()
+            } else {
+                format!("{} ago", uptime)
+            },
+        ),
         ("Memory:", format_bytes(info.memory_bytes)),
         ("CPU time:", format!("{:.1}s", info.cpu_seconds)),
         ("Children:", info.children.to_string()),
@@ -491,6 +530,7 @@ fn prompt_kill(pid: u32, force: bool) -> bool {
     false
 }
 
+#[cfg(unix)]
 fn do_kill(pid: u32, force: bool) {
     // Guard against special PIDs and overflow on cast to i32
     if pid == 0 {
@@ -501,11 +541,7 @@ fn do_kill(pid: u32, force: bool) {
         return;
     }
     if pid > i32::MAX as u32 {
-        eprintln!(
-            "  {} PID {} exceeds safe range",
-            "✗".red().bold(),
-            pid
-        );
+        eprintln!("  {} PID {} exceeds safe range", "✗".red().bold(), pid);
         return;
     }
 
@@ -525,12 +561,43 @@ fn do_kill(pid: u32, force: bool) {
         );
     } else {
         let err = io::Error::last_os_error();
-        eprintln!(
-            "  {} Failed to kill PID {}: {}",
-            "✗".red().bold(),
-            pid,
-            err
-        );
+        eprintln!("  {} Failed to kill PID {}: {}", "✗".red().bold(), pid, err);
+    }
+}
+
+#[cfg(windows)]
+fn do_kill(pid: u32, _force: bool) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+
+    if pid == 0 {
+        eprintln!("  {} Refusing to terminate PID 0", "✗".red().bold(),);
+        return;
+    }
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if handle.is_null() {
+            let err = io::Error::last_os_error();
+            eprintln!("  {} Failed to open PID {}: {}", "✗".red().bold(), pid, err);
+            return;
+        }
+
+        // Windows has no graceful SIGTERM equivalent — always force-terminates
+        let result = TerminateProcess(handle, 1);
+        CloseHandle(handle);
+
+        if result != 0 {
+            println!("  {} Terminated PID {}", "✓".green().bold(), pid);
+        } else {
+            let err = io::Error::last_os_error();
+            eprintln!(
+                "  {} Failed to terminate PID {}: {}",
+                "✗".red().bold(),
+                pid,
+                err
+            );
+        }
     }
 }
 
@@ -609,8 +676,20 @@ fn show_cursor() {
     let _ = io::stdout().flush();
 }
 
+#[cfg(unix)]
 extern "C" fn handle_sigint(_sig: libc::c_int) {
     RUNNING.store(false, Ordering::SeqCst);
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn handle_ctrl(ctrl_type: u32) -> i32 {
+    // CTRL_C_EVENT = 0, CTRL_BREAK_EVENT = 1
+    if ctrl_type == 0 || ctrl_type == 1 {
+        RUNNING.store(false, Ordering::SeqCst);
+        1 // TRUE — handled
+    } else {
+        0 // FALSE — pass to next handler
+    }
 }
 
 fn print_watch_footer(use_color: bool) {
@@ -623,6 +702,7 @@ fn print_watch_footer(use_color: bool) {
     }
 }
 
+#[cfg(unix)]
 fn chrono_free_time() -> String {
     // Get wall-clock HH:MM:SS without pulling in chrono
     let secs_since_epoch = SystemTime::now()
@@ -646,8 +726,18 @@ fn chrono_free_time() -> String {
     format!("{:02}:{:02}:{:02}", h, m, s)
 }
 
+#[cfg(windows)]
+fn chrono_free_time() -> String {
+    use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+
+    let mut st = unsafe { std::mem::zeroed::<windows_sys::Win32::Foundation::SYSTEMTIME>() };
+    unsafe { GetLocalTime(&mut st) };
+    format!("{:02}:{:02}:{:02}", st.wHour, st.wMinute, st.wSecond)
+}
+
 // ── Terminal helpers ──────────────────────────────────────────────────
 
+#[cfg(unix)]
 fn get_terminal_width() -> Option<u16> {
     unsafe {
         let mut winsize: libc::winsize = std::mem::zeroed();
@@ -655,6 +745,31 @@ fn get_terminal_width() -> Option<u16> {
             && winsize.ws_col > 0
         {
             Some(winsize.ws_col)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(windows)]
+fn get_terminal_width() -> Option<u16> {
+    use windows_sys::Win32::System::Console::{
+        GetConsoleScreenBufferInfo, GetStdHandle, CONSOLE_SCREEN_BUFFER_INFO, STD_OUTPUT_HANDLE,
+    };
+
+    unsafe {
+        let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        if handle.is_null() {
+            return None;
+        }
+        let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
+        if GetConsoleScreenBufferInfo(handle, &mut info) != 0 {
+            let width = info.srWindow.Right - info.srWindow.Left + 1;
+            if width > 0 {
+                Some(width as u16)
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -697,36 +812,64 @@ fn main() {
     }
 
     if cli.watch {
-        // Register SIGINT handler for clean exit
+        // Register signal/ctrl handler for clean exit
+        #[cfg(unix)]
         unsafe {
-            libc::signal(libc::SIGINT, handle_sigint as libc::sighandler_t);
+            libc::signal(
+                libc::SIGINT,
+                handle_sigint as *const () as libc::sighandler_t,
+            );
         }
-        enter_alt_screen();
-        hide_cursor();
+        #[cfg(windows)]
+        unsafe {
+            windows_sys::Win32::System::Console::SetConsoleCtrlHandler(
+                Some(handle_ctrl),
+                1, // TRUE — add handler
+            );
+        }
 
-        while RUNNING.load(Ordering::SeqCst) {
-            // Synchronized update: terminal buffers all output between
-            // begin/end markers and renders in a single
-            // frame — no flicker even though we clear the screen.
-            print!("\x1B[?2026h");
-            cursor_home();
-            erase_below();
-            run_display(&cli, use_color, &colors);
-            print_watch_footer(use_color);
-            print!("\x1B[?2026l");
-            let _ = io::stdout().flush();
-
-            // Sleep in small increments so we respond to Ctrl+C quickly
-            for _ in 0..20 {
-                if !RUNNING.load(Ordering::SeqCst) {
-                    break;
+        if cli.json {
+            // JSON watch: emit one JSON array per tick, no terminal escapes
+            while RUNNING.load(Ordering::SeqCst) {
+                if write_display_safe(&cli, use_color, &colors).is_err() {
+                    break; // broken pipe
                 }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-        }
 
-        show_cursor();
-        leave_alt_screen();
+                for _ in 0..20 {
+                    if !RUNNING.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        } else {
+            enter_alt_screen();
+            hide_cursor();
+
+            while RUNNING.load(Ordering::SeqCst) {
+                // Synchronized update: terminal buffers all output between
+                // begin/end markers and renders in a single
+                // frame — no flicker even though we clear the screen.
+                print!("\x1B[?2026h");
+                cursor_home();
+                erase_below();
+                run_display(&cli, use_color, &colors);
+                print_watch_footer(use_color);
+                print!("\x1B[?2026l");
+                let _ = io::stdout().flush();
+
+                // Sleep in small increments so we respond to Ctrl+C quickly
+                for _ in 0..20 {
+                    if !RUNNING.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+
+            show_cursor();
+            leave_alt_screen();
+        }
     } else {
         run_display(&cli, use_color, &colors);
     }
@@ -742,13 +885,43 @@ fn compute_cmd_width(infos: &[PortInfo]) -> usize {
     }
 
     // Measure the max content width of each non-command column (min = header width)
-    let port_w = infos.iter().map(|i| i.port.to_string().len()).max().unwrap_or(0).max(4);     // "PORT"
-    let proto_w = infos.iter().map(|i| i.protocol.len()).max().unwrap_or(0).max(5);             // "PROTO"
-    let pid_w = infos.iter().map(|i| i.pid.to_string().len()).max().unwrap_or(0).max(3);        // "PID"
-    let user_w = infos.iter().map(|i| i.user.len()).max().unwrap_or(0).max(4);                  // "USER"
-    let process_w = infos.iter().map(|i| i.process_name.len()).max().unwrap_or(0).max(7);       // "PROCESS"
-    let uptime_w = infos.iter().map(|i| format_uptime(i.start_time).len()).max().unwrap_or(0).max(6); // "UPTIME"
-    let mem_w = infos.iter().map(|i| format_bytes(i.memory_bytes).len()).max().unwrap_or(0).max(3);   // "MEM"
+    let port_w = infos
+        .iter()
+        .map(|i| i.port.to_string().len())
+        .max()
+        .unwrap_or(0)
+        .max(4); // "PORT"
+    let proto_w = infos
+        .iter()
+        .map(|i| i.protocol.len())
+        .max()
+        .unwrap_or(0)
+        .max(5); // "PROTO"
+    let pid_w = infos
+        .iter()
+        .map(|i| i.pid.to_string().len())
+        .max()
+        .unwrap_or(0)
+        .max(3); // "PID"
+    let user_w = infos.iter().map(|i| i.user.len()).max().unwrap_or(0).max(4); // "USER"
+    let process_w = infos
+        .iter()
+        .map(|i| i.process_name.len())
+        .max()
+        .unwrap_or(0)
+        .max(7); // "PROCESS"
+    let uptime_w = infos
+        .iter()
+        .map(|i| format_uptime(i.start_time).len())
+        .max()
+        .unwrap_or(0)
+        .max(6); // "UPTIME"
+    let mem_w = infos
+        .iter()
+        .map(|i| format_bytes(i.memory_bytes).len())
+        .max()
+        .unwrap_or(0)
+        .max(3); // "MEM"
 
     let data_width = port_w + proto_w + pid_w + user_w + process_w + uptime_w + mem_w;
 
@@ -756,6 +929,12 @@ fn compute_cmd_width(infos: &[PortInfo]) -> usize {
     let chrome = 9 + (8 * 2);
 
     cols.saturating_sub(data_width + chrome).max(20)
+}
+
+/// Run display and catch broken pipe errors (for piped JSON watch mode).
+fn write_display_safe(cli: &Cli, use_color: bool, colors: &ColorConfig) -> io::Result<()> {
+    run_display(cli, use_color, colors);
+    io::stdout().flush()
 }
 
 fn run_display(cli: &Cli, use_color: bool, colors: &ColorConfig) {
@@ -785,10 +964,7 @@ fn run_display(cli: &Cli, use_color: bool, colors: &ColorConfig) {
                 }
                 display_table(&infos, use_color, colors, cli.wide, cmd_width);
                 if use_color && !infos.is_empty() && !cli.watch {
-                    println!(
-                        "{}",
-                        "  Inspect a port: portview <port>".dimmed()
-                    );
+                    println!("{}", "  Inspect a port: portview <port>".dimmed());
                 }
             }
         }
@@ -799,7 +975,9 @@ fn run_display(cli: &Cli, use_color: bool, colors: &ColorConfig) {
                 let matches: Vec<&PortInfo> = infos.iter().filter(|i| i.port == port).collect();
 
                 if matches.is_empty() {
-                    if use_color {
+                    if cli.json {
+                        println!("[]");
+                    } else if use_color {
                         println!(
                             "\n  {} Nothing on port {}",
                             "○".dimmed(),
@@ -809,31 +987,30 @@ fn run_display(cli: &Cli, use_color: bool, colors: &ColorConfig) {
                         println!("\n  Nothing on port {}", port);
                     }
                     if !cli.watch {
-                        std::process::exit(0);
+                        std::process::exit(1);
                     }
                     return;
                 }
 
-                for info in &matches {
-                    display_detail(info, use_color);
-                }
+                if cli.json {
+                    let owned: Vec<PortInfo> = matches.into_iter().cloned().collect();
+                    display_json(&owned);
+                } else {
+                    for info in &matches {
+                        display_detail(info, use_color);
+                    }
 
-                // Offer to kill interactively (only when NOT watching)
-                if !cli.watch && matches.len() == 1 && atty_stdout() && atty_stdin() {
-                    prompt_kill(matches[0].pid, cli.force);
-                }
-            } else {
-                // Search by process name
-                let mut infos = get_port_infos(!cli.all);
-                let cmd_width = compute_cmd_width(&infos);
-                if !cli.wide {
-                    for info in &mut infos {
-                        info.command = truncate_cmd(&info.command, cmd_width);
+                    // Offer to kill interactively (only when NOT watching)
+                    if !cli.watch && matches.len() == 1 && atty_stdout() && atty_stdin() {
+                        prompt_kill(matches[0].pid, cli.force);
                     }
                 }
+            } else {
+                // Search by process name — filter on full command, then truncate for display
+                let mut infos = get_port_infos(!cli.all);
                 let target_lower = target.to_lowercase();
-                let matches: Vec<&PortInfo> = infos
-                    .iter()
+                let mut matches: Vec<PortInfo> = infos
+                    .drain(..)
                     .filter(|i| {
                         i.process_name.to_lowercase().contains(&target_lower)
                             || i.command.to_lowercase().contains(&target_lower)
@@ -853,16 +1030,29 @@ fn run_display(cli: &Cli, use_color: bool, colors: &ColorConfig) {
                     if !cli.watch {
                         std::process::exit(1);
                     }
+                } else if cli.json {
+                    display_json(&matches);
                 } else {
+                    let cmd_width = compute_cmd_width(&matches);
+                    if !cli.wide {
+                        for info in &mut matches {
+                            info.command = truncate_cmd(&info.command, cmd_width);
+                        }
+                    }
                     if use_color {
                         println!(
                             "\n {} matching '{}'",
-                            format!(" {} port{}", matches.len(), if matches.len() == 1 { "" } else { "s" }).bold(),
+                            format!(
+                                " {} port{}",
+                                matches.len(),
+                                if matches.len() == 1 { "" } else { "s" }
+                            )
+                            .bold(),
                             target.cyan()
                         );
                     }
 
-                    display_table(&matches.iter().copied().cloned().collect::<Vec<_>>(), use_color, colors, cli.wide, cmd_width);
+                    display_table(&matches, use_color, colors, cli.wide, cmd_width);
                 }
             }
         }
@@ -875,4 +1065,335 @@ fn atty_stdout() -> bool {
 
 fn atty_stdin() -> bool {
     io::stdin().is_terminal()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    // ── format_bytes ────────────────────────────────────────────────
+
+    #[test]
+    fn format_bytes_zero() {
+        assert_eq!(format_bytes(0), "-");
+    }
+
+    #[test]
+    fn format_bytes_bytes_range() {
+        assert_eq!(format_bytes(1), "1 B");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+    }
+
+    #[test]
+    fn format_bytes_kb_range() {
+        assert_eq!(format_bytes(1024), "1 KB");
+        assert_eq!(format_bytes(1536), "2 KB"); // rounds
+        assert_eq!(format_bytes(1024 * 1024 - 1), "1024 KB");
+    }
+
+    #[test]
+    fn format_bytes_mb_range() {
+        assert_eq!(format_bytes(1024 * 1024), "1 MB");
+        assert_eq!(format_bytes(500 * 1024 * 1024), "500 MB");
+    }
+
+    #[test]
+    fn format_bytes_gb_range() {
+        assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GB");
+        assert_eq!(format_bytes(2 * 1024 * 1024 * 1024), "2.0 GB");
+    }
+
+    #[test]
+    fn format_bytes_u64_max_no_panic() {
+        let result = format_bytes(u64::MAX);
+        assert!(result.contains("GB"));
+    }
+
+    // ── json_escape ─────────────────────────────────────────────────
+
+    #[test]
+    fn json_escape_plain() {
+        assert_eq!(json_escape("hello world"), "hello world");
+    }
+
+    #[test]
+    fn json_escape_empty() {
+        assert_eq!(json_escape(""), "");
+    }
+
+    #[test]
+    fn json_escape_quote() {
+        assert_eq!(json_escape(r#"say "hi""#), r#"say \"hi\""#);
+    }
+
+    #[test]
+    fn json_escape_backslash() {
+        assert_eq!(json_escape(r"a\b"), r"a\\b");
+    }
+
+    #[test]
+    fn json_escape_newline() {
+        assert_eq!(json_escape("a\nb"), r"a\nb");
+    }
+
+    #[test]
+    fn json_escape_carriage_return() {
+        assert_eq!(json_escape("a\rb"), r"a\rb");
+    }
+
+    #[test]
+    fn json_escape_tab() {
+        assert_eq!(json_escape("a\tb"), r"a\tb");
+    }
+
+    #[test]
+    fn json_escape_control_char() {
+        assert_eq!(json_escape("\x01"), r"\u0001");
+    }
+
+    #[test]
+    fn json_escape_null() {
+        assert_eq!(json_escape("\0"), r"\u0000");
+    }
+
+    #[test]
+    fn json_escape_mixed() {
+        assert_eq!(json_escape("a\"b\\c\nd"), r#"a\"b\\c\nd"#);
+    }
+
+    #[test]
+    fn json_escape_unicode_passthrough() {
+        assert_eq!(json_escape("café ☕"), "café ☕");
+    }
+
+    // ── is_valid_color ──────────────────────────────────────────────
+
+    #[test]
+    fn is_valid_color_all_valid() {
+        let valid = [
+            "red",
+            "green",
+            "blue",
+            "cyan",
+            "yellow",
+            "magenta",
+            "white",
+            "bold",
+            "dimmed",
+            "bright_red",
+            "bright_green",
+            "bright_blue",
+            "bright_cyan",
+            "bright_yellow",
+            "bright_magenta",
+            "bright_white",
+            "none",
+        ];
+        for c in &valid {
+            assert!(is_valid_color(c), "{} should be valid", c);
+        }
+    }
+
+    #[test]
+    fn is_valid_color_invalid() {
+        assert!(!is_valid_color(""));
+        assert!(!is_valid_color("fuchsia"));
+        assert!(!is_valid_color("Red")); // case-sensitive
+        assert!(!is_valid_color("#ff0000"));
+    }
+
+    // ── truncate_cmd ────────────────────────────────────────────────
+
+    #[test]
+    fn truncate_cmd_short() {
+        assert_eq!(truncate_cmd("abc", 10), "abc");
+    }
+
+    #[test]
+    fn truncate_cmd_exact_fit() {
+        assert_eq!(truncate_cmd("abcde", 5), "abcde");
+    }
+
+    #[test]
+    fn truncate_cmd_overflow() {
+        let result = truncate_cmd("abcdef", 5);
+        assert_eq!(result, "abcd…");
+    }
+
+    #[test]
+    fn truncate_cmd_max_zero() {
+        let result = truncate_cmd("abc", 0);
+        assert_eq!(result, "…");
+    }
+
+    #[test]
+    fn truncate_cmd_max_one() {
+        let result = truncate_cmd("abc", 1);
+        assert_eq!(result, "…");
+    }
+
+    #[test]
+    fn truncate_cmd_empty_input() {
+        assert_eq!(truncate_cmd("", 10), "");
+    }
+
+    #[test]
+    fn truncate_cmd_multibyte_boundary() {
+        // 'é' is 2 bytes in UTF-8; truncation must not split it
+        let result = truncate_cmd("café123", 5);
+        // "café" is 5 bytes, so end=4 would split 'é'; should back up
+        assert!(result.is_char_boundary(result.len().saturating_sub("…".len())));
+        assert!(result.ends_with('…'));
+    }
+
+    // ── format_addr ─────────────────────────────────────────────────
+
+    #[test]
+    fn format_addr_v4_unspecified() {
+        let addr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        assert_eq!(format_addr(&addr), "*");
+    }
+
+    #[test]
+    fn format_addr_v4_specific() {
+        let addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        assert_eq!(format_addr(&addr), "127.0.0.1");
+    }
+
+    #[test]
+    fn format_addr_v6_unspecified() {
+        let addr = IpAddr::V6(Ipv6Addr::UNSPECIFIED);
+        assert_eq!(format_addr(&addr), "*");
+    }
+
+    #[test]
+    fn format_addr_v6_loopback() {
+        let addr = IpAddr::V6(Ipv6Addr::LOCALHOST);
+        assert_eq!(format_addr(&addr), "::1");
+    }
+
+    #[test]
+    fn format_addr_v6_mapped_v4_unspecified() {
+        // ::ffff:0.0.0.0
+        let addr = IpAddr::V6(Ipv4Addr::UNSPECIFIED.to_ipv6_mapped());
+        assert_eq!(format_addr(&addr), "*");
+    }
+
+    #[test]
+    fn format_addr_v6_mapped_v4_specific() {
+        // ::ffff:192.168.1.1
+        let addr = IpAddr::V6(Ipv4Addr::new(192, 168, 1, 1).to_ipv6_mapped());
+        assert_eq!(format_addr(&addr), "192.168.1.1");
+    }
+
+    #[test]
+    fn format_addr_v6_real() {
+        let addr = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
+        assert_eq!(format_addr(&addr), "2001:db8::1");
+    }
+
+    // ── TcpState Display ────────────────────────────────────────────
+
+    #[test]
+    fn tcp_state_display_matches_as_str() {
+        let states = [
+            TcpState::Listen,
+            TcpState::Established,
+            TcpState::TimeWait,
+            TcpState::CloseWait,
+            TcpState::FinWait1,
+            TcpState::FinWait2,
+            TcpState::SynSent,
+            TcpState::SynRecv,
+            TcpState::Closing,
+            TcpState::LastAck,
+            TcpState::Close,
+            TcpState::Unknown,
+        ];
+        for state in &states {
+            assert_eq!(state.to_string(), state.as_str());
+        }
+    }
+
+    // ── TcpState::from_hex (Linux only) ─────────────────────────────
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tcp_state_from_hex_known() {
+        assert_eq!(TcpState::from_hex("0A"), TcpState::Listen);
+        assert_eq!(TcpState::from_hex("01"), TcpState::Established);
+        assert_eq!(TcpState::from_hex("06"), TcpState::TimeWait);
+        assert_eq!(TcpState::from_hex("08"), TcpState::CloseWait);
+        assert_eq!(TcpState::from_hex("04"), TcpState::FinWait1);
+        assert_eq!(TcpState::from_hex("05"), TcpState::FinWait2);
+        assert_eq!(TcpState::from_hex("02"), TcpState::SynSent);
+        assert_eq!(TcpState::from_hex("03"), TcpState::SynRecv);
+        assert_eq!(TcpState::from_hex("0B"), TcpState::Closing);
+        assert_eq!(TcpState::from_hex("09"), TcpState::LastAck);
+        assert_eq!(TcpState::from_hex("07"), TcpState::Close);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tcp_state_from_hex_unknown() {
+        assert_eq!(TcpState::from_hex("FF"), TcpState::Unknown);
+        assert_eq!(TcpState::from_hex(""), TcpState::Unknown);
+    }
+
+    // ── format_uptime ───────────────────────────────────────────────
+
+    #[test]
+    fn format_uptime_none() {
+        assert_eq!(format_uptime(None), "-");
+    }
+
+    #[test]
+    fn format_uptime_future() {
+        let future = SystemTime::now() + Duration::from_secs(3600);
+        assert_eq!(format_uptime(Some(future)), "-");
+    }
+
+    #[test]
+    fn format_uptime_seconds() {
+        let start = SystemTime::now() - Duration::from_secs(30);
+        let result = format_uptime(Some(start));
+        // Allow ±1s tolerance for test execution time
+        assert!(
+            result == "30s" || result == "29s" || result == "31s",
+            "unexpected: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn format_uptime_minutes() {
+        let start = SystemTime::now() - Duration::from_secs(300);
+        let result = format_uptime(Some(start));
+        assert!(result == "5m" || result == "4m", "unexpected: {}", result);
+    }
+
+    #[test]
+    fn format_uptime_hours_and_minutes() {
+        let start = SystemTime::now() - Duration::from_secs(3660);
+        let result = format_uptime(Some(start));
+        assert!(
+            result == "1h 1m" || result == "1h 0m",
+            "unexpected: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn format_uptime_days_and_hours() {
+        let start = SystemTime::now() - Duration::from_secs(90000);
+        let result = format_uptime(Some(start));
+        assert!(result.contains("d"), "expected days format: {}", result);
+        assert!(
+            result.contains("h"),
+            "expected hours in days format: {}",
+            result
+        );
+    }
 }

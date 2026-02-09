@@ -19,7 +19,8 @@ const MAXPATHLEN: u32 = 1024;
 // ── FFI declarations ─────────────────────────────────────────────────
 
 extern "C" {
-    fn proc_listpids(r#type: u32, typeinfo: u32, buffer: *mut libc::c_void, buffersize: i32) -> i32;
+    fn proc_listpids(r#type: u32, typeinfo: u32, buffer: *mut libc::c_void, buffersize: i32)
+        -> i32;
     fn proc_pidinfo(
         pid: i32,
         flavor: i32,
@@ -274,15 +275,7 @@ fn list_all_pids() -> Vec<i32> {
 }
 
 fn list_fds(pid: i32) -> Vec<ProcFdInfo> {
-    let size = unsafe {
-        proc_pidinfo(
-            pid,
-            PROC_PIDLISTFDS,
-            0,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
+    let size = unsafe { proc_pidinfo(pid, PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
     if size <= 0 {
         return vec![];
     }
@@ -343,13 +336,7 @@ fn get_task_all_info(pid: i32) -> Option<ProcTaskAllInfo> {
 
 fn get_pid_path(pid: i32) -> String {
     let mut buf = [0u8; MAXPATHLEN as usize];
-    let ret = unsafe {
-        proc_pidpath(
-            pid,
-            buf.as_mut_ptr() as *mut libc::c_void,
-            MAXPATHLEN,
-        )
-    };
+    let ret = unsafe { proc_pidpath(pid, buf.as_mut_ptr() as *mut libc::c_void, MAXPATHLEN) };
     if ret > 0 {
         String::from_utf8_lossy(&buf[..ret as usize]).to_string()
     } else {
@@ -439,9 +426,8 @@ pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
                 ("TCP".to_string(), state, port, addr)
             } else if si.soi_kind == SOCKINFO_IN {
                 // UDP socket
-                let in_info: InSockInfo = unsafe {
-                    std::ptr::read_unaligned(si.soi_proto.as_ptr() as *const InSockInfo)
-                };
+                let in_info: InSockInfo =
+                    unsafe { std::ptr::read_unaligned(si.soi_proto.as_ptr() as *const InSockInfo) };
                 let port = u16::from_be(in_info.insi_lport as u16);
                 let addr = extract_addr(&in_info.insi_laddr, in_info.insi_vflag);
                 // UDP doesn't have LISTEN — treat bound sockets as listening
@@ -460,7 +446,12 @@ pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
                 }
             }
 
-            hits.push(SocketHit { protocol, state, local_port, local_addr });
+            hits.push(SocketHit {
+                protocol,
+                state,
+                local_port,
+                local_addr,
+            });
         }
 
         if hits.is_empty() {
@@ -527,11 +518,83 @@ pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
         }
     }
 
-    // Sort by port number
-    infos.sort_by(|a, b| a.port.cmp(&b.port).then_with(|| a.protocol.cmp(&b.protocol)));
+    // Sort by port number, then protocol, then pid (pid needed for dedup_by adjacency)
+    infos.sort_by(|a, b| {
+        a.port
+            .cmp(&b.port)
+            .then_with(|| a.protocol.cmp(&b.protocol))
+            .then_with(|| a.pid.cmp(&b.pid))
+    });
 
     // Deduplicate (same port+proto+pid can appear for v4 and v6)
     infos.dedup_by(|a, b| a.port == b.port && a.protocol == b.protocol && a.pid == b.pid);
 
     infos
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── process_name_from_path ──────────────────────────────────────
+
+    #[test]
+    fn process_name_full_path() {
+        assert_eq!(process_name_from_path("/usr/bin/nginx"), "nginx");
+    }
+
+    #[test]
+    fn process_name_nested_path() {
+        assert_eq!(
+            process_name_from_path("/Applications/Safari.app/Contents/MacOS/Safari"),
+            "Safari"
+        );
+    }
+
+    #[test]
+    fn process_name_bare_name() {
+        assert_eq!(process_name_from_path("nginx"), "nginx");
+    }
+
+    #[test]
+    fn process_name_empty() {
+        assert_eq!(process_name_from_path(""), "");
+    }
+
+    #[test]
+    fn process_name_trailing_slash() {
+        assert_eq!(process_name_from_path("/usr/bin/"), "");
+    }
+
+    // ── cstr_from_bytes ─────────────────────────────────────────────
+
+    #[test]
+    fn cstr_normal_null_terminated() {
+        assert_eq!(cstr_from_bytes(b"hello\0world"), "hello");
+    }
+
+    #[test]
+    fn cstr_no_null() {
+        assert_eq!(cstr_from_bytes(b"hello"), "hello");
+    }
+
+    #[test]
+    fn cstr_empty() {
+        assert_eq!(cstr_from_bytes(b""), "");
+    }
+
+    #[test]
+    fn cstr_only_null() {
+        assert_eq!(cstr_from_bytes(b"\0"), "");
+    }
+
+    #[test]
+    fn cstr_multiple_nulls() {
+        assert_eq!(cstr_from_bytes(b"\0\0\0"), "");
+    }
+
+    #[test]
+    fn cstr_embedded_null() {
+        assert_eq!(cstr_from_bytes(b"ab\0cd\0"), "ab");
+    }
 }
