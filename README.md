@@ -5,45 +5,46 @@
 
 See what's on your ports, then act on it.
 
-A diagnostic-first port viewer for Linux, macOS, and Windows. No more `lsof -i :3000 | grep LISTEN` incantations. One command shows you what's listening, who owns it, how long it's been running, and offers to kill it if you want.
+A diagnostic-first port viewer for Linux, macOS, and Windows. One command shows you what's listening, who owns it, how long it's been running, and lets you act on it. With `--docker`, Docker containers appear as first-class rows - inspect, stop, restart, or tail logs right from the TUI.
 
-~960 KB single binary. Zero runtime dependencies.
+~1 MB single binary. Zero runtime dependencies.
 
 <p align="center">
-  <img src="demo.gif" alt="portview --watch demo" width="100%" loop=infinite>
+  <img src="demo.gif" alt="portview demo" width="100%" loop=infinite>
 </p>
 
 ## Install
 
-**One-liner** (downloads pre-built binary):
-
 ```bash
+# One-liner (Linux/macOS)
 curl -fsSL https://raw.githubusercontent.com/mapika/portview/main/install.sh | sh
-```
 
-**PowerShell** (Windows):
-
-```powershell
+# PowerShell (Windows)
 irm https://raw.githubusercontent.com/mapika/portview/main/install.ps1 | iex
-```
 
-**Homebrew**:
-
-```bash
+# Homebrew
 brew install mapika/tap/portview
-```
 
-**Cargo** (build from source):
-
-```bash
+# Cargo
 cargo install portview
 ```
 
-**Manual**: grab the binary from [Releases](https://github.com/mapika/portview/releases), `chmod +x`, drop in PATH.
+Or grab the binary from [Releases](https://github.com/mapika/portview/releases).
+
+## Quick start
+
+```bash
+portview                      # list all listening ports
+portview 3000                 # inspect port 3000 in detail
+portview node                 # find ports by process name
+portview watch                # interactive TUI
+portview watch --docker       # TUI with Docker containers
+portview kill 3000 --force    # kill what's on port 3000
+```
 
 ## Usage
 
-### Show all listening ports
+### Scan
 
 ```
 $ portview
@@ -57,12 +58,14 @@ $ portview
 ╰──────┴───────┴───────┴──────┴──────────┴─────────┴────────┴─────────────────────────────────────╯
 ```
 
-### Inspect a specific port
+Use `--all` to include non-listening connections. Use `--wide` to show full commands without truncation.
+
+### Inspect a port
 
 ```
 $ portview 3000
 
-Port 3000 (TCP) — node (PID 48291)
+Port 3000 (TCP) - node (PID 48291)
   Bind:     *:3000
   Command:  next dev
   User:     mark
@@ -77,122 +80,117 @@ Port 3000 (TCP) — node (PID 48291)
 
 ### Search by process name
 
-```
-$ portview python
-╭──────┬───────┬───────┬──────┬─────────┬────────┬───────┬──────────────────────────────────╮
-│ PORT │ PROTO │ PID   │ USER │ PROCESS │ UPTIME │ MEM   │ COMMAND                          │
-├──────┼───────┼───────┼──────┼─────────┼────────┼───────┼──────────────────────────────────┤
-│ 8000 │ TCP   │ 51002 │ mark │ python3 │ 22m    │ 45 MB │ uvicorn main:app --port 8000     │
-│ 8080 │ TCP   │ 51340 │ mark │ python3 │ 5m     │ 32 MB │ python3 -m http.server 8080      │
-╰──────┴───────┴───────┴──────┴─────────┴────────┴───────┴──────────────────────────────────╯
+```bash
+portview node        # matches process name and command
+portview python
 ```
 
-### Kill directly
+### Docker integration
+
+Add `--docker` to any command. Docker-published ports that have no visible host process appear as their own rows:
+
+```
+$ portview --docker
+╭──────┬───────┬───────┬────────┬──────────┬────────┬────────┬───────────────────────────────────╮
+│ PORT │ PROTO │ PID   │ USER   │ PROCESS  │ UPTIME │ MEM    │ COMMAND                           │
+├──────┼───────┼───────┼────────┼──────────┼────────┼────────┼───────────────────────────────────┤
+│ 3000 │ TCP   │ 48291 │ mark   │ node     │ 3h 12m │ 248 MB │ next dev [docker:web]             │
+│ 5432 │ TCP   │ 1203  │ pg     │ postgres │ 14d 2h │ 38 MB  │ /usr/lib/postgresql/16/bin/post…  │
+│ 8080 │ TCP   │ -     │ docker │ pv-nginx │      - │      - │ nginx:alpine :8080->80/tcp        │
+╰──────┴───────┴───────┴────────┴──────────┴────────┴────────┴───────────────────────────────────╯
+```
+
+- Host processes with a Docker mapping get a `[docker:<name>]` tag
+- Docker-only ports (no host PID) show as synthetic rows with `PID -`
+- `portview 8080 --docker` shows container detail with image info
+- `portview nginx --docker` finds containers by name
+- Works in all modes: scan, inspect, search, watch, and JSON
+
+### Kill
 
 ```bash
-portview -k 3000          # SIGTERM (Unix) / TerminateProcess (Windows)
-portview -k 3000 --force  # SIGKILL (Unix) / TerminateProcess (Windows)
+portview kill 3000          # SIGTERM (Unix) / TerminateProcess (Windows)
+portview kill 3000 --force  # SIGKILL
 ```
 
-> **Note:** On Windows, `--kill` always force-terminates the process via `TerminateProcess`. There is no graceful shutdown equivalent to Unix SIGTERM.
+> On Windows, kill always force-terminates via `TerminateProcess`.
 
 ### Watch mode (interactive TUI)
 
 ```bash
-portview --watch            # interactive TUI, refreshes every 1s
-portview -w 3000            # watch a specific port
-portview -w node            # watch filtered by process name
-portview -w --json          # streaming JSON, useful for piping
+portview watch               # interactive TUI, refreshes every 1s
+portview watch 3000          # watch a specific port
+portview watch node          # filter by process name
+portview watch --docker      # show Docker containers as rows
+portview watch --json        # streaming JSON (no TUI)
 ```
-
-Watch mode opens an interactive TUI with a scrollable table, row selection, filtering, and kill confirmation.
 
 #### Keybindings
 
-**Table view:**
-
 | Key | Action |
 |-----|--------|
-| `j` / `↓` | Select next row |
-| `k` / `↑` | Select previous row |
-| `g` / `Home` | Jump to first row |
-| `G` / `End` | Jump to last row |
-| `Enter` | Inspect selected port (detail view) |
-| `d` | Kill process (SIGTERM, with confirmation) |
-| `D` | Force kill (SIGKILL, with confirmation) |
-| `/` | Enter filter mode |
-| `<` / `>` | Cycle sort column left / right |
-| `r` | Reverse sort direction |
-| `1`-`8` | Jump to column N (same column toggles direction) |
-| `a` | Toggle all/listening-only ports |
-| `q` / `Esc` | Quit |
-| `Ctrl+C` | Quit |
+| `j`/`k`, `↑`/`↓` | Navigate rows |
+| `g`/`G`, `Home`/`End` | Jump to first/last |
+| `Enter` | Inspect selected port |
+| `d`/`D` | Kill process **or** manage Docker container |
+| `/` | Filter across all columns |
+| `<`/`>`, `r` | Cycle sort column, reverse direction |
+| `1`-`8` | Sort by column N |
+| `a` | Toggle all/listening-only |
+| `q`, `Esc`, `Ctrl+C` | Quit |
 
-**Detail view:** `Esc` to go back, `d`/`D` to kill, `q` to quit.
+**On a Docker row**, `d` opens a container management popup with **Stop**, **Restart**, and **Logs** actions. On a host process row, `d`/`D` opens the kill confirmation popup (SIGTERM / SIGKILL).
 
-**Filter mode:** Type to filter across all columns, `Enter` to apply, `Esc` to cancel and clear.
-
-**Kill popup:** `y`/`Enter` to confirm, `n`/`Esc` to cancel.
-
-Use `--watch --json` for non-interactive streaming JSON output (no TUI).
-
-### JSON output
+### JSON
 
 ```bash
-portview --json | jq '.[] | select(.process == "node")'
-```
-
-### Show all connections (not just listening)
-
-```bash
-portview --all
+portview --json                                          # all ports
+portview --docker --json                                 # with Docker ownership
+portview --docker --json | jq '.[] | {port, process, docker}'
+portview watch --json --docker                           # streaming
 ```
 
 ### Custom colors
-
-Table columns are colored by default. Customize with the `PORTVIEW_COLORS` environment variable:
 
 ```bash
 PORTVIEW_COLORS="port=red,pid=magenta,command=bright_cyan" portview
 ```
 
-Available columns: `port`, `proto`, `pid`, `user`, `process`, `uptime`, `mem`, `command`
+Columns: `port`, `proto`, `pid`, `user`, `process`, `uptime`, `mem`, `command`
 
-Available colors: `red`, `green`, `blue`, `cyan`, `yellow`, `magenta`, `white`, `bold`, `dimmed`, `bright_red`, `bright_green`, `bright_blue`, `bright_cyan`, `bright_yellow`, `bright_magenta`, `bright_white`, `none`
+Colors: `red`, `green`, `blue`, `cyan`, `yellow`, `magenta`, `white`, `bold`, `dimmed`, `bright_*`, `none`
 
-One-shot defaults: `port=cyan, proto=dimmed, pid=yellow, user=green, process=bold, uptime=dimmed, mem=dimmed, command=white`
+Watch mode uses an RGB palette by default. Set `PORTVIEW_COLORS` to override, or `--no-color` to disable.
 
-Watch mode uses a soft RGB color palette by default. Set `PORTVIEW_COLORS` to override, or `--no-color` to disable all colors.
+## How it works
 
-## What it shows
+All process and port data is read directly from the OS - no shelling out to `lsof`, `ss`, or `netstat`.
 
-For each listening port:
-
-| Field | Linux source | macOS source | Windows source |
-|-------|-------------|--------------|----------------|
-| Port & protocol | `/proc/net/tcp`, `/proc/net/udp` | `proc_pidfdinfo` | `GetExtendedTcpTable` / `GetExtendedUdpTable` |
-| PID | inode→pid mapping via `/proc/*/fd/` | `proc_listpids` | Included in socket table |
+| Field | Linux | macOS | Windows |
+|-------|-------|-------|---------|
+| Port & protocol | `/proc/net/tcp{,6}`, `udp{,6}` | `proc_pidfdinfo` | `GetExtendedTcp/UdpTable` |
+| PID | inode→pid via `/proc/*/fd/` | `proc_listpids` | Included in socket table |
 | Process name | `/proc/<pid>/comm` | `proc_pidpath` | `QueryFullProcessImageNameW` |
-| Full command | `/proc/<pid>/cmdline` | `proc_pidpath` | `QueryFullProcessImageNameW` |
+| Command | `/proc/<pid>/cmdline` | `proc_pidpath` | `QueryFullProcessImageNameW` |
 | User | `/proc/<pid>/status` → `getpwuid` | `proc_pidinfo` → `getpwuid` | `OpenProcessToken` → `LookupAccountSidW` |
-| Uptime | `/proc/<pid>/stat` starttime + btime | `proc_pidinfo` start time | `GetProcessTimes` |
-| RSS memory | `/proc/<pid>/status` VmRSS | `proc_pidinfo` resident size | `K32GetProcessMemoryInfo` WorkingSetSize |
-| CPU time | `/proc/<pid>/stat` utime + stime | `proc_pidinfo` total user + system | `GetProcessTimes` kernel + user |
-| Child count | `/proc/<pid>/task/<pid>/children` | `proc_listchildpids` | `CreateToolhelp32Snapshot` |
+| Uptime | `/proc/<pid>/stat` starttime | `proc_pidinfo` start time | `GetProcessTimes` |
+| Memory (RSS) | `/proc/<pid>/status` VmRSS | `proc_pidinfo` resident size | `K32GetProcessMemoryInfo` |
+| CPU time | `/proc/<pid>/stat` utime+stime | `proc_pidinfo` user+system | `GetProcessTimes` |
+| Children | `/proc/<pid>/task/*/children` | `proc_listchildpids` | `CreateToolhelp32Snapshot` |
 
-Everything is read directly from the OS. No shelling out to `lsof`, `ss`, `netstat`, or `netsh`.
+Docker integration queries `docker ps` when `--docker` is passed.
 
-## Why not...
+## Why portview
 
-| Tool | Issue |
-|------|-------|
+| Tool | Limitation |
+|------|-----------|
 | `lsof -i :3000` | Different flags per OS, cryptic output, slow |
-| `ss -tlnp` | Powerful but unreadable, no uptime/memory info |
-| `fkill-cli` | Node.js dependency, kill-first not diagnostic-first |
-| `killport` | Rust but kill-only, no inspection |
+| `ss -tlnp` | Powerful but unreadable, no uptime/memory |
+| `fkill-cli` | Requires Node.js, kill-first not diagnostic-first |
+| `killport` | Kill-only, no inspection |
 | `procs` | General process viewer, not port-centric |
 
-portview is diagnostic-first: understand what's on your ports, then optionally act.
+portview is diagnostic-first: understand what's on your ports, then act.
 
 ## Building from source
 
@@ -200,14 +198,14 @@ portview is diagnostic-first: understand what's on your ports, then optionally a
 git clone https://github.com/mapika/portview
 cd portview
 cargo build --release
-cp target/release/portview /usr/local/bin/
 ```
 
 ## Limitations
 
-- **Linux:** Needs read access to `/proc/<pid>/fd/` for inode→pid mapping. Processes owned by other users are hidden without `sudo`.
-- **macOS:** Processes owned by other users may not be visible without `sudo`.
-- **Windows:** Some system/protected processes may not be accessible. `--kill` always force-terminates (no graceful SIGTERM equivalent). Run as Administrator to see all processes.
+- **Linux:** Needs read access to `/proc/<pid>/fd/`. Other users' processes require `sudo`.
+- **macOS:** Other users' processes may require `sudo`.
+- **Windows:** Some system processes may not be accessible. Kill always force-terminates. Run as Administrator for full visibility.
+- **Docker:** Requires the `docker` CLI and access to the Docker daemon.
 
 ## License
 

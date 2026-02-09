@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -15,6 +16,9 @@ use ratatui::widgets::{
 };
 use ratatui::Terminal;
 
+use crate::docker::{
+    get_docker_port_map, run_docker_action, run_docker_logs, DockerPortMap, DockerPortOwner,
+};
 #[cfg(target_os = "linux")]
 use crate::linux::get_port_infos;
 #[cfg(target_os = "macos")]
@@ -23,8 +27,8 @@ use crate::macos::get_port_infos;
 use crate::windows::get_port_infos;
 
 use crate::{
-    chrono_free_time, format_addr, format_bytes, format_uptime, kill_process, truncate_cmd,
-    PortInfo, StyleConfig,
+    chrono_free_time, format_addr, format_bytes, format_uptime, kill_process, short_container_id,
+    synthesize_docker_entries, truncate_cmd, wrap_cmd, PortInfo, StyleConfig,
 };
 
 // ── Sort types ───────────────────────────────────────────────────────
@@ -192,13 +196,26 @@ struct KillPopup {
     force: bool,
 }
 
+struct DockerPopup {
+    container_name: String,
+    port: u16,
+    selected: usize, // 0=Stop, 1=Restart, 2=Logs
+}
+
+enum Popup {
+    Kill(KillPopup),
+    Docker(DockerPopup),
+}
+
 pub struct App {
     ports: Vec<PortInfo>,
+    docker_enabled: bool,
+    docker_map: DockerPortMap,
     table_state: TableState,
     mode: AppMode,
     show_all: bool,
     filter_text: String,
-    popup: Option<KillPopup>,
+    popup: Option<Popup>,
     target: Option<String>,
     styles: StyleConfig,
     theme: TuiTheme,
@@ -219,6 +236,7 @@ impl App {
         wide: bool,
         force: bool,
         no_color: bool,
+        docker_enabled: bool,
         styles: StyleConfig,
     ) -> Self {
         let theme = if no_color {
@@ -228,6 +246,8 @@ impl App {
         };
         let mut app = Self {
             ports: Vec::new(),
+            docker_enabled,
+            docker_map: DockerPortMap::default(),
             table_state: TableState::default(),
             mode: AppMode::Table,
             show_all,
@@ -254,6 +274,15 @@ impl App {
 
     fn refresh_data(&mut self) {
         self.ports = get_port_infos(!self.show_all);
+        self.docker_map = if self.docker_enabled {
+            get_docker_port_map()
+        } else {
+            DockerPortMap::default()
+        };
+        if self.docker_enabled {
+            let synthetic = synthesize_docker_entries(&self.ports, &self.docker_map);
+            self.ports.extend(synthetic);
+        }
         self.last_refresh = Instant::now();
 
         // Clamp selection
@@ -269,19 +298,43 @@ impl App {
         }
     }
 
+    fn docker_owners_for_port(&self, port: u16) -> Option<&[DockerPortOwner]> {
+        self.docker_map.get(&port).map(|owners| owners.as_slice())
+    }
+
+    fn docker_search_match(&self, port: u16, needle: &str) -> bool {
+        self.docker_owners_for_port(port).is_some_and(|owners| {
+            owners.iter().any(|owner| {
+                owner.container_name.to_lowercase().contains(needle)
+                    || owner.image.to_lowercase().contains(needle)
+                    || owner.container_id.to_lowercase().contains(needle)
+            })
+        })
+    }
+
+    fn docker_tag_for_port(&self, port: u16) -> Option<String> {
+        let owners = self.docker_owners_for_port(port)?;
+        let first = owners.first()?;
+        if owners.len() == 1 {
+            Some(first.container_name.clone())
+        } else {
+            Some(format!("{}+{}", first.container_name, owners.len() - 1))
+        }
+    }
+
     fn filtered_ports(&self) -> Vec<&PortInfo> {
         let mut result: Vec<&PortInfo> = self.ports.iter().collect();
 
         // Apply CLI target filter (process name search)
         if let Some(ref target) = self.target {
-            if target.parse::<u16>().is_ok() {
-                let port: u16 = target.parse().unwrap();
+            if let Ok(port) = target.parse::<u16>() {
                 result.retain(|i| i.port == port);
             } else {
                 let t = target.to_lowercase();
                 result.retain(|i| {
                     i.process_name.to_lowercase().contains(&t)
                         || i.command.to_lowercase().contains(&t)
+                        || (self.docker_enabled && self.docker_search_match(i.port, &t))
                 });
             }
         }
@@ -296,6 +349,7 @@ impl App {
                     || i.process_name.to_lowercase().contains(&f)
                     || i.command.to_lowercase().contains(&f)
                     || i.user.to_lowercase().contains(&f)
+                    || (self.docker_enabled && self.docker_search_match(i.port, &f))
             });
         }
 
@@ -376,40 +430,11 @@ impl App {
     }
 }
 
-fn wrap_cmd(cmd: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![cmd.to_string()];
-    }
-    if cmd.is_empty() {
-        return vec![String::new()];
-    }
-
-    let mut lines = Vec::new();
-    let mut start = 0usize;
-    while start < cmd.len() {
-        let mut end = (start + width).min(cmd.len());
-        while end > start && !cmd.is_char_boundary(end) {
-            end -= 1;
-        }
-
-        if end == start {
-            end = cmd[start..]
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| start + i)
-                .unwrap_or(cmd.len());
-        }
-
-        lines.push(cmd[start..end].to_string());
-        start = end;
-    }
-    lines
-}
-
 // ── Rendering ────────────────────────────────────────────────────────
 
 fn build_title_line(app: &App) -> Line<'_> {
-    let port_count = app.sorted_ports().len();
+    let visible_ports = app.sorted_ports();
+    let port_count = visible_ports.len();
     let mut spans = vec![
         Span::styled(" portview", app.theme.title),
         Span::styled("  ", app.theme.footer_text),
@@ -445,6 +470,17 @@ fn build_title_line(app: &App) -> Line<'_> {
         ));
     }
 
+    if app.docker_enabled {
+        let mapped_count = visible_ports
+            .iter()
+            .filter(|info| app.docker_map.contains_key(&info.port))
+            .count();
+        spans.push(Span::styled(
+            format!("[docker: {} mapped] ", mapped_count),
+            Style::default().fg(Color::Rgb(110, 190, 220)),
+        ));
+    }
+
     if let Some((ref msg, at)) = app.status_message {
         if at.elapsed() < Duration::from_secs(3) {
             spans.push(Span::styled(msg.clone(), app.theme.status_ok));
@@ -469,13 +505,13 @@ fn build_footer_line(app: &App) -> Line<'_> {
             Span::styled(" cancel ", app.theme.footer_text),
         ])
     } else {
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled(" j/k", app.theme.footer_key),
             Span::styled(" move  ", app.theme.footer_text),
             Span::styled("Enter", app.theme.footer_key),
             Span::styled(" inspect  ", app.theme.footer_text),
             Span::styled("d/D", app.theme.footer_key),
-            Span::styled(" kill  ", app.theme.footer_text),
+            Span::styled(" action  ", app.theme.footer_text),
             Span::styled("/", app.theme.footer_key),
             Span::styled(" filter  ", app.theme.footer_text),
             Span::styled("</>/r", app.theme.footer_key),
@@ -484,8 +520,16 @@ fn build_footer_line(app: &App) -> Line<'_> {
             Span::styled(" all  ", app.theme.footer_text),
             Span::styled("q", app.theme.footer_key),
             Span::styled(" quit  ", app.theme.footer_text),
-            Span::styled(format!("Updated {} ", time), app.theme.footer_text),
-        ])
+        ];
+        if app.docker_enabled {
+            spans.push(Span::styled("docker", app.theme.footer_key));
+            spans.push(Span::styled(" filterable  ", app.theme.footer_text));
+        }
+        spans.push(Span::styled(
+            format!("Updated {} ", time),
+            app.theme.footer_text,
+        ));
+        Line::from(spans)
     }
 }
 
@@ -514,8 +558,10 @@ fn render(frame: &mut ratatui::Frame, app: &mut App) {
     }
 
     // Popup overlay
-    if app.popup.is_some() {
-        render_kill_popup(frame, app, area);
+    match &app.popup {
+        Some(Popup::Kill(_)) => render_kill_popup(frame, app, area),
+        Some(Popup::Docker(_)) => render_docker_popup(frame, app, area),
+        None => {}
     }
 }
 
@@ -558,20 +604,50 @@ fn render_table(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let rows: Vec<Row> = ports
         .iter()
         .map(|info| {
+            let mut command_text = info.command.clone();
+            if app.docker_enabled && info.pid != 0 {
+                if let Some(tag) = app.docker_tag_for_port(info.port) {
+                    command_text.push_str(&format!(" [ctr:{}]", tag));
+                }
+            }
+
             let cmd_lines = if wide {
-                wrap_cmd(&info.command, cmd_width)
+                wrap_cmd(&command_text, cmd_width)
             } else {
-                vec![truncate_cmd(&info.command, cmd_width)]
+                vec![truncate_cmd(&command_text, cmd_width)]
             };
             let row_height = cmd_lines.len().max(1) as u16;
             let cmd_text = Text::from(cmd_lines.into_iter().map(Line::from).collect::<Vec<_>>());
+            let is_synthetic = info.pid == 0;
+            let docker_blue = Style::default()
+                .fg(Color::Rgb(110, 190, 220))
+                .add_modifier(Modifier::BOLD);
+            let has_docker =
+                app.docker_enabled && !is_synthetic && app.docker_map.contains_key(&info.port);
+            let process_style = if is_synthetic {
+                docker_blue
+            } else if has_docker {
+                app.theme.status_ok.add_modifier(Modifier::BOLD)
+            } else {
+                app.styles.process
+            };
+            let process_text = if has_docker {
+                format!("{}*", info.process_name)
+            } else {
+                info.process_name.clone()
+            };
+            let pid_str = if is_synthetic {
+                "-".to_string()
+            } else {
+                info.pid.to_string()
+            };
 
             Row::new(vec![
                 Cell::from(info.port.to_string()).style(app.styles.port),
                 Cell::from(info.protocol.clone()).style(app.styles.proto),
-                Cell::from(info.pid.to_string()).style(app.styles.pid),
+                Cell::from(pid_str).style(app.styles.pid),
                 Cell::from(info.user.clone()).style(app.styles.user),
-                Cell::from(info.process_name.clone()).style(app.styles.process),
+                Cell::from(process_text).style(process_style),
                 Cell::from(Line::from(format_uptime(info.start_time)).alignment(Alignment::Right))
                     .style(app.styles.uptime),
                 Cell::from(Line::from(format_bytes(info.memory_bytes)).alignment(Alignment::Right))
@@ -615,31 +691,46 @@ fn render_detail(frame: &mut ratatui::Frame, app: &App, area: Rect) {
 
     let bind_str = format!("{}:{}", format_addr(&info.local_addr), info.port);
     let uptime = format_uptime(info.start_time);
+    let is_docker = info.pid == 0;
+    let docker_blue = Style::default().fg(Color::Rgb(110, 190, 220));
 
-    let title_line = Line::from(vec![
+    let mut title_spans = vec![
         Span::styled("Port ", app.theme.title),
         Span::styled(info.port.to_string(), app.theme.title),
         Span::styled(format!(" ({}) ", info.protocol), app.theme.footer_text),
         Span::styled("\u{2014} ", app.theme.footer_text),
         Span::styled(&info.process_name, app.theme.status_ok),
-        Span::styled(
+    ];
+    if is_docker {
+        title_spans.push(Span::styled(" [container]", docker_blue));
+    } else {
+        title_spans.push(Span::styled(
             format!(" (PID {})", info.pid),
             Style::default().fg(Color::Rgb(220, 180, 80)),
-        ),
-    ]);
+        ));
+    }
+    let title_line = Line::from(title_spans);
 
     let label_style = app.theme.footer_text;
 
-    let rows = vec![
-        ("Bind:", bind_str),
-        ("Command:", info.command.clone()),
-        ("User:", info.user.clone()),
-        ("Started:", format!("{} ago", uptime)),
-        ("Memory:", format_bytes(info.memory_bytes)),
-        ("CPU time:", format!("{:.1}s", info.cpu_seconds)),
-        ("Children:", info.children.to_string()),
-        ("State:", info.state.to_string()),
-    ];
+    let rows: Vec<(&str, String)> = if is_docker {
+        vec![
+            ("Bind:", bind_str),
+            ("Image:", info.command.clone()),
+            ("State:", info.state.to_string()),
+        ]
+    } else {
+        vec![
+            ("Bind:", bind_str),
+            ("Command:", info.command.clone()),
+            ("User:", info.user.clone()),
+            ("Started:", format!("{} ago", uptime)),
+            ("Memory:", format_bytes(info.memory_bytes)),
+            ("CPU time:", format!("{:.1}s", info.cpu_seconds)),
+            ("Children:", info.children.to_string()),
+            ("State:", info.state.to_string()),
+        ]
+    };
 
     let mut lines = vec![Line::default(), title_line, Line::default()];
     for (label, value) in &rows {
@@ -649,17 +740,72 @@ fn render_detail(frame: &mut ratatui::Frame, app: &App, area: Rect) {
             Span::raw(value),
         ]));
     }
+
+    if app.docker_enabled {
+        lines.push(Line::default());
+        let owners = app.docker_owners_for_port(info.port).unwrap_or(&[]);
+        if owners.is_empty() {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(format!("{:<10}", "Docker:"), label_style),
+                Span::raw("none"),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(format!("{:<10}", "Docker:"), label_style),
+                Span::raw(format!("{} mapping(s)", owners.len())),
+            ]));
+            let mut seen = HashSet::new();
+            for owner in owners {
+                lines.push(Line::from(vec![
+                    Span::raw("    - "),
+                    Span::styled(owner.container_name.clone(), app.theme.status_ok),
+                    Span::raw(format!(
+                        " [{}] ({}) {} -> {}/{}",
+                        owner.image,
+                        short_container_id(&owner.container_id),
+                        info.port,
+                        owner.container_port,
+                        owner.protocol
+                    )),
+                ]));
+                if seen.insert(owner.container_name.clone()) {
+                    lines.push(Line::from(vec![Span::raw(format!(
+                        "      docker logs --tail 100 {}",
+                        owner.container_name
+                    ))]));
+                    lines.push(Line::from(vec![Span::raw(format!(
+                        "      docker restart {}",
+                        owner.container_name
+                    ))]));
+                }
+            }
+        }
+    }
+
     lines.push(Line::default());
-    lines.push(Line::from(vec![
-        Span::styled("  Esc", app.theme.footer_key),
-        Span::styled(" back  ", app.theme.footer_text),
-        Span::styled("d", app.theme.footer_key),
-        Span::styled(" kill  ", app.theme.footer_text),
-        Span::styled("D", app.theme.footer_key),
-        Span::styled(" force kill  ", app.theme.footer_text),
-        Span::styled("q", app.theme.footer_key),
-        Span::styled(" quit", app.theme.footer_text),
-    ]));
+    if is_docker {
+        lines.push(Line::from(vec![
+            Span::styled("  Esc", app.theme.footer_key),
+            Span::styled(" back  ", app.theme.footer_text),
+            Span::styled("d", app.theme.footer_key),
+            Span::styled(" stop/restart/logs  ", app.theme.footer_text),
+            Span::styled("q", app.theme.footer_key),
+            Span::styled(" quit", app.theme.footer_text),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("  Esc", app.theme.footer_key),
+            Span::styled(" back  ", app.theme.footer_text),
+            Span::styled("d", app.theme.footer_key),
+            Span::styled(" kill  ", app.theme.footer_text),
+            Span::styled("D", app.theme.footer_key),
+            Span::styled(" force kill  ", app.theme.footer_text),
+            Span::styled("q", app.theme.footer_key),
+            Span::styled(" quit", app.theme.footer_text),
+        ]));
+    }
 
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, area);
@@ -667,8 +813,8 @@ fn render_detail(frame: &mut ratatui::Frame, app: &App, area: Rect) {
 
 fn render_kill_popup(frame: &mut ratatui::Frame, app: &App, area: Rect) {
     let popup = match &app.popup {
-        Some(p) => p,
-        None => return,
+        Some(Popup::Kill(p)) => p,
+        _ => return,
     };
 
     let signal = if popup.force { "SIGKILL" } else { "SIGTERM" };
@@ -711,6 +857,69 @@ fn render_kill_popup(frame: &mut ratatui::Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, popup_area);
 }
 
+fn render_docker_popup(frame: &mut ratatui::Frame, app: &App, area: Rect) {
+    let popup = match &app.popup {
+        Some(Popup::Docker(p)) => p,
+        _ => return,
+    };
+
+    let actions = ["Stop", "Restart", "Logs"];
+    let docker_blue = Style::default().fg(Color::Rgb(110, 190, 220));
+
+    let mut lines = vec![
+        Line::default(),
+        Line::from(vec![
+            Span::raw("  Container: "),
+            Span::styled(&popup.container_name, app.theme.status_ok),
+            Span::raw(format!(" (port {})", popup.port)),
+        ]),
+        Line::default(),
+    ];
+
+    for (i, action) in actions.iter().enumerate() {
+        let marker = if i == popup.selected { "> " } else { "  " };
+        let style = if i == popup.selected {
+            docker_blue.add_modifier(Modifier::BOLD)
+        } else {
+            app.theme.footer_text
+        };
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(format!("{}{}", marker, action), style),
+        ]));
+    }
+
+    lines.push(Line::default());
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("j/k", app.theme.footer_key),
+        Span::styled(" navigate  ", app.theme.footer_text),
+        Span::styled("Enter", app.theme.footer_key),
+        Span::styled(" confirm  ", app.theme.footer_text),
+        Span::styled("Esc", app.theme.footer_key),
+        Span::styled(" cancel", app.theme.footer_text),
+    ]));
+    lines.push(Line::default());
+
+    let popup_width = 50u16.min(area.width.saturating_sub(4));
+    let popup_height = 9u16.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(docker_blue)
+        .title(" Docker Container ")
+        .title_alignment(Alignment::Center)
+        .title_style(docker_blue.add_modifier(Modifier::BOLD));
+
+    frame.render_widget(Clear, popup_area);
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, popup_area);
+}
+
 // ── Event handling ───────────────────────────────────────────────────
 
 fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
@@ -720,10 +929,17 @@ fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         return;
     }
 
-    // Kill popup takes priority
-    if app.popup.is_some() {
-        handle_popup_key(app, code);
-        return;
+    // Popup takes priority
+    match &app.popup {
+        Some(Popup::Kill(_)) => {
+            handle_kill_popup_key(app, code);
+            return;
+        }
+        Some(Popup::Docker(_)) => {
+            handle_docker_popup_key(app, code);
+            return;
+        }
+        None => {}
     }
 
     match app.mode {
@@ -748,22 +964,38 @@ fn handle_table_key(app: &mut App, code: KeyCode) {
         }
         KeyCode::Char('d') => {
             if let Some(info) = app.selected_port().cloned() {
-                app.popup = Some(KillPopup {
-                    pid: info.pid,
-                    process_name: info.process_name.clone(),
-                    port: info.port,
-                    force: app.default_force,
-                });
+                if info.pid == 0 {
+                    app.popup = Some(Popup::Docker(DockerPopup {
+                        container_name: info.process_name.clone(),
+                        port: info.port,
+                        selected: 0,
+                    }));
+                } else {
+                    app.popup = Some(Popup::Kill(KillPopup {
+                        pid: info.pid,
+                        process_name: info.process_name.clone(),
+                        port: info.port,
+                        force: app.default_force,
+                    }));
+                }
             }
         }
         KeyCode::Char('D') => {
             if let Some(info) = app.selected_port().cloned() {
-                app.popup = Some(KillPopup {
-                    pid: info.pid,
-                    process_name: info.process_name.clone(),
-                    port: info.port,
-                    force: true,
-                });
+                if info.pid == 0 {
+                    app.popup = Some(Popup::Docker(DockerPopup {
+                        container_name: info.process_name.clone(),
+                        port: info.port,
+                        selected: 0,
+                    }));
+                } else {
+                    app.popup = Some(Popup::Kill(KillPopup {
+                        pid: info.pid,
+                        process_name: info.process_name.clone(),
+                        port: info.port,
+                        force: true,
+                    }));
+                }
             }
         }
         KeyCode::Char('/') => {
@@ -805,23 +1037,39 @@ fn handle_detail_key(app: &mut App, code: KeyCode) {
         KeyCode::Char('d') => {
             let ports = app.sorted_ports();
             if let Some(info) = ports.get(app.detail_index) {
-                app.popup = Some(KillPopup {
-                    pid: info.pid,
-                    process_name: info.process_name.clone(),
-                    port: info.port,
-                    force: app.default_force,
-                });
+                if info.pid == 0 {
+                    app.popup = Some(Popup::Docker(DockerPopup {
+                        container_name: info.process_name.clone(),
+                        port: info.port,
+                        selected: 0,
+                    }));
+                } else {
+                    app.popup = Some(Popup::Kill(KillPopup {
+                        pid: info.pid,
+                        process_name: info.process_name.clone(),
+                        port: info.port,
+                        force: app.default_force,
+                    }));
+                }
             }
         }
         KeyCode::Char('D') => {
             let ports = app.sorted_ports();
             if let Some(info) = ports.get(app.detail_index) {
-                app.popup = Some(KillPopup {
-                    pid: info.pid,
-                    process_name: info.process_name.clone(),
-                    port: info.port,
-                    force: true,
-                });
+                if info.pid == 0 {
+                    app.popup = Some(Popup::Docker(DockerPopup {
+                        container_name: info.process_name.clone(),
+                        port: info.port,
+                        selected: 0,
+                    }));
+                } else {
+                    app.popup = Some(Popup::Kill(KillPopup {
+                        pid: info.pid,
+                        process_name: info.process_name.clone(),
+                        port: info.port,
+                        force: true,
+                    }));
+                }
             }
         }
         _ => {}
@@ -859,10 +1107,10 @@ fn handle_filter_key(app: &mut App, code: KeyCode) {
     }
 }
 
-fn handle_popup_key(app: &mut App, code: KeyCode) {
+fn handle_kill_popup_key(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Char('y') | KeyCode::Enter => {
-            if let Some(popup) = app.popup.take() {
+            if let Some(Popup::Kill(popup)) = app.popup.take() {
                 app.status_message = Some((
                     match kill_process(popup.pid, popup.force) {
                         Ok("TerminateProcess") => {
@@ -884,6 +1132,40 @@ fn handle_popup_key(app: &mut App, code: KeyCode) {
     }
 }
 
+fn handle_docker_popup_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            if let Some(Popup::Docker(ref mut p)) = app.popup {
+                p.selected = (p.selected + 1).min(2);
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            if let Some(Popup::Docker(ref mut p)) = app.popup {
+                p.selected = p.selected.saturating_sub(1);
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(Popup::Docker(popup)) = app.popup.take() {
+                let msg = match popup.selected {
+                    0 => run_docker_action("stop", &popup.container_name),
+                    1 => run_docker_action("restart", &popup.container_name),
+                    2 => {
+                        let logs = run_docker_logs(&popup.container_name);
+                        format!("Logs: {}", logs.lines().last().unwrap_or("(empty)"))
+                    }
+                    _ => String::new(),
+                };
+                app.status_message = Some((msg, Instant::now()));
+                app.refresh_data();
+            }
+        }
+        KeyCode::Esc | KeyCode::Char('n') => {
+            app.popup = None;
+        }
+        _ => {}
+    }
+}
+
 // ── Main entry point ─────────────────────────────────────────────────
 
 pub fn run_tui(
@@ -892,6 +1174,7 @@ pub fn run_tui(
     wide: bool,
     force: bool,
     no_color: bool,
+    docker: bool,
     styles: StyleConfig,
 ) -> io::Result<()> {
     // Setup terminal
@@ -903,7 +1186,7 @@ pub fn run_tui(
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let mut app = App::new(target, show_all, wide, force, no_color, styles);
+    let mut app = App::new(target, show_all, wide, force, no_color, docker, styles);
 
     let tick_rate = Duration::from_secs(1);
 
@@ -970,13 +1253,15 @@ mod tests {
     fn make_test_app(ports: Vec<PortInfo>) -> App {
         App {
             ports,
+            docker_enabled: false,
+            docker_map: DockerPortMap::default(),
             table_state: TableState::default(),
             mode: AppMode::Table,
             show_all: false,
             filter_text: String::new(),
             popup: None,
             target: None,
-            styles: StyleConfig::no_color(),
+            styles: StyleConfig::default(),
             theme: TuiTheme::no_color(),
             wide: false,
             default_force: false,
@@ -1063,6 +1348,48 @@ mod tests {
 
         app.filter_text = "nonexistent".to_string();
         assert!(app.filtered_ports().is_empty());
+    }
+
+    #[test]
+    fn filtered_ports_matches_docker_container_name() {
+        let mut app = make_test_app(vec![make_port_info(3000, "node", "next dev")]);
+        app.docker_enabled = true;
+        app.docker_map.insert(
+            3000,
+            vec![DockerPortOwner {
+                container_id: "0123456789abcdef".to_string(),
+                container_name: "web".to_string(),
+                image: "nginx:latest".to_string(),
+                container_port: 80,
+                protocol: "TCP".to_string(),
+            }],
+        );
+
+        app.filter_text = "web".to_string();
+        let filtered = app.filtered_ports();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].port, 3000);
+    }
+
+    #[test]
+    fn filtered_ports_target_matches_docker_image() {
+        let mut app = make_test_app(vec![make_port_info(5432, "postgres", "postgres")]);
+        app.docker_enabled = true;
+        app.docker_map.insert(
+            5432,
+            vec![DockerPortOwner {
+                container_id: "aaaaaaaaaaaa1111".to_string(),
+                container_name: "db".to_string(),
+                image: "postgres:16".to_string(),
+                container_port: 5432,
+                protocol: "TCP".to_string(),
+            }],
+        );
+        app.target = Some("postgres:16".to_string());
+
+        let filtered = app.filtered_ports();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].port, 5432);
     }
 
     #[test]
@@ -1158,21 +1485,5 @@ mod tests {
         assert_eq!(SortColumn::from_index(0), Some(SortColumn::Port));
         assert_eq!(SortColumn::from_index(7), Some(SortColumn::Command));
         assert_eq!(SortColumn::from_index(8), None);
-    }
-
-    #[test]
-    fn wrap_cmd_ascii_width() {
-        assert_eq!(
-            wrap_cmd("abcdefghijkl", 5),
-            vec!["abcde".to_string(), "fghij".to_string(), "kl".to_string()]
-        );
-    }
-
-    #[test]
-    fn wrap_cmd_utf8_boundary() {
-        assert_eq!(
-            wrap_cmd("café123", 5),
-            vec!["café".to_string(), "123".to_string()]
-        );
     }
 }
