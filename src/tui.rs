@@ -8,7 +8,7 @@ use crossterm::terminal::{
 };
 use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Alignment, Constraint, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
@@ -568,8 +568,29 @@ fn render(frame: &mut ratatui::Frame, app: &mut App) {
 fn render_table(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let ports = app.sorted_ports();
     let wide = app.wide;
-    let total = area.width as usize;
-    let cmd_width = total.saturating_sub(77).max(10);
+
+    let widths = [
+        Constraint::Length(6),
+        Constraint::Length(5),
+        Constraint::Length(7),
+        Constraint::Length(8),
+        Constraint::Length(10),
+        Constraint::Length(8),
+        Constraint::Length(8),
+        Constraint::Fill(1),
+    ];
+
+    // Compute cmd_width by replicating ratatui's Table layout: first split off the
+    // highlight-symbol area, then lay out columns with spacing in the remainder.
+    let hl_width = if app.table_state.selected().is_some() {
+        app.theme.highlight_symbol.chars().count() as u16
+    } else {
+        0
+    };
+    let [_, columns_area] = Layout::horizontal([Constraint::Length(hl_width), Constraint::Fill(0)])
+        .areas(Rect::new(0, 0, area.width, 1));
+    let col_rects = Layout::horizontal(widths).spacing(1).split(columns_area);
+    let cmd_width = (col_rects[7].width as usize).max(10);
 
     let columns = [
         SortColumn::Port,
@@ -657,17 +678,6 @@ fn render_table(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
             .height(row_height)
         })
         .collect();
-
-    let widths = [
-        Constraint::Length(6),
-        Constraint::Length(5),
-        Constraint::Length(7),
-        Constraint::Length(8),
-        Constraint::Length(10),
-        Constraint::Length(8),
-        Constraint::Length(8),
-        Constraint::Fill(1),
-    ];
 
     let table = Table::new(rows, widths)
         .header(header)
