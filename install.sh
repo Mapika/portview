@@ -25,7 +25,12 @@ case "$ARCH" in
     *)               echo "Error: Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
-TARGET="${os}-${arch}"
+# Use statically-linked musl builds on Linux (no glibc dependency)
+if [ "$os" = "linux" ]; then
+    TARGET="${os}-${arch}-musl"
+else
+    TARGET="${os}-${arch}"
+fi
 
 # ── Fetch latest release ─────────────────────────────────────────────
 

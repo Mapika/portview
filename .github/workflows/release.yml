@@ -33,6 +33,12 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             name: linux-aarch64
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            name: linux-x86_64-musl
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            name: linux-aarch64-musl
           - target: x86_64-apple-darwin
             os: macos-14
             name: darwin-x86_64
@@ -54,18 +60,29 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install cross-compilation tools
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        if: contains(matrix.target, 'aarch64-unknown-linux') || contains(matrix.target, 'musl')
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          PACKAGES=""
+          if [[ "$TARGET" == *"aarch64"*"gnu"* ]]; then
+            PACKAGES="gcc-aarch64-linux-gnu"
+          elif [[ "$TARGET" == "x86_64"*"musl"* ]]; then
+            PACKAGES="musl-tools"
+          elif [[ "$TARGET" == "aarch64"*"musl"* ]]; then
+            PACKAGES="musl-tools gcc-aarch64-linux-gnu"
+          fi
+          sudo apt-get install -y $PACKAGES
+        env:
+          TARGET: ${{ matrix.target }}
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
 
       - name: Smoke test (Unix)
-        if: matrix.target != 'aarch64-unknown-linux-gnu' && runner.os != 'Windows'
+        if: "!contains(matrix.target, 'aarch64-unknown-linux') && runner.os != 'Windows'"
         run: |
           ./target/${{ matrix.target }}/release/portview --version
           ./target/${{ matrix.target }}/release/portview || true
