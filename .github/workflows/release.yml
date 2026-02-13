@@ -134,3 +134,87 @@ jobs:
             SHA256SUMS
           generate_release_notes: true
 
+  update-homebrew:
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download checksums
+        run: |
+          gh release download "$GITHUB_REF_NAME" --repo Mapika/portview --pattern SHA256SUMS
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Parse checksums
+        id: sha
+        run: |
+          echo "darwin_aarch64=$(grep 'darwin-aarch64.tar.gz' SHA256SUMS | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "darwin_x86_64=$(grep 'darwin-x86_64.tar.gz' SHA256SUMS | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "linux_aarch64_musl=$(grep 'linux-aarch64-musl.tar.gz' SHA256SUMS | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "linux_x86_64_musl=$(grep 'linux-x86_64-musl.tar.gz' SHA256SUMS | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: Mapika/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Update formula
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA_DARWIN_AARCH64: ${{ steps.sha.outputs.darwin_aarch64 }}
+          SHA_DARWIN_X86_64: ${{ steps.sha.outputs.darwin_x86_64 }}
+          SHA_LINUX_AARCH64_MUSL: ${{ steps.sha.outputs.linux_aarch64_musl }}
+          SHA_LINUX_X86_64_MUSL: ${{ steps.sha.outputs.linux_x86_64_musl }}
+        run: |
+          cat > Formula/portview.rb << EOF
+          class Portview < Formula
+            desc "A diagnostic-first port viewer. See what's on your ports, then act on it."
+            homepage "https://github.com/Mapika/portview"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/Mapika/portview/releases/download/v#{version}/portview-darwin-aarch64.tar.gz"
+                sha256 "${SHA_DARWIN_AARCH64}"
+              else
+                url "https://github.com/Mapika/portview/releases/download/v#{version}/portview-darwin-x86_64.tar.gz"
+                sha256 "${SHA_DARWIN_X86_64}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/Mapika/portview/releases/download/v#{version}/portview-linux-aarch64-musl.tar.gz"
+                sha256 "${SHA_LINUX_AARCH64_MUSL}"
+              else
+                url "https://github.com/Mapika/portview/releases/download/v#{version}/portview-linux-x86_64-musl.tar.gz"
+                sha256 "${SHA_LINUX_X86_64_MUSL}"
+              end
+            end
+
+            def install
+              bin.install "portview"
+            end
+
+            test do
+              assert_match "portview", shell_output("#{bin}/portview --version")
+            end
+          end
+          EOF
+          sed -i 's/^          //' Formula/portview.rb
+
+      - name: Commit and push
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/portview.rb
+          git commit -m "Update portview to ${VERSION}"
+          git push
+
