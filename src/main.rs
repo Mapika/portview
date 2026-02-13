@@ -1359,12 +1359,11 @@ fn main() {
 
     if config.watch {
         run_watch_mode(&config, cli.no_color, use_color, &colors);
-    } else if let Err(err) = run_display(&config, use_color, &colors) {
-        if err.kind() != io::ErrorKind::BrokenPipe {
+    } else if let Err(err) = run_display(&config, use_color, &colors)
+        && err.kind() != io::ErrorKind::BrokenPipe {
             eprintln!("Failed to write output: {}", err);
             std::process::exit(1);
         }
-    }
 }
 
 /// Compute available width for the command column based on actual data.

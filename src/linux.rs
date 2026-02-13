@@ -150,11 +150,9 @@ fn build_inode_to_pid_map() -> HashMap<u64, u32> {
             if let Some(inode_str) = link_str
                 .strip_prefix("socket:[")
                 .and_then(|s| s.strip_suffix(']'))
-            {
-                if let Ok(inode) = inode_str.parse::<u64>() {
+                && let Ok(inode) = inode_str.parse::<u64>() {
                     map.insert(inode, pid);
                 }
-            }
         }
     }
 

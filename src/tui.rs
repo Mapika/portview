@@ -488,12 +488,11 @@ fn build_title_line(app: &App) -> Line<'_> {
         ));
     }
 
-    if let Some((ref msg, at)) = app.status_message {
-        if at.elapsed() < Duration::from_secs(3) {
+    if let Some((ref msg, at)) = app.status_message
+        && at.elapsed() < Duration::from_secs(3) {
             spans.push(Span::styled(msg.clone(), app.theme.status_ok));
             spans.push(Span::raw(" "));
         }
-    }
 
     Line::from(spans)
 }
@@ -635,11 +634,10 @@ fn render_table(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
         .iter()
         .map(|info| {
             let mut command_text = info.command.clone();
-            if app.docker_enabled && info.pid != 0 {
-                if let Some(tag) = app.docker_tag_for_port(info.port) {
+            if app.docker_enabled && info.pid != 0
+                && let Some(tag) = app.docker_tag_for_port(info.port) {
                     command_text.push_str(&format!(" [ctr:{}]", tag));
                 }
-            }
 
             let cmd_lines = if wide {
                 wrap_cmd(&command_text, cmd_width)
@@ -1229,14 +1227,13 @@ pub fn run_tui(
             .checked_sub(app.last_refresh.elapsed())
             .unwrap_or(Duration::ZERO);
 
-        if event::poll(remaining)? {
-            if let Event::Key(key) = event::read()? {
+        if event::poll(remaining)?
+            && let Event::Key(key) = event::read()? {
                 // Only handle Press events (not Release/Repeat)
                 if key.kind == KeyEventKind::Press {
                     handle_key(&mut app, key.code, key.modifiers);
                 }
             }
-        }
     }
 
     // Restore terminal
