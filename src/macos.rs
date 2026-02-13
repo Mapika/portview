@@ -1,7 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, UNIX_EPOCH};
 
-use crate::{get_username, PortInfo, TcpState};
+use crate::{PortInfo, TcpState, get_username};
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -20,7 +20,7 @@ const MAXPATHLEN: u32 = 1024;
 
 extern "C" {
     fn proc_listpids(r#type: u32, typeinfo: u32, buffer: *mut libc::c_void, buffersize: i32)
-        -> i32;
+    -> i32;
     fn proc_pidinfo(
         pid: i32,
         flavor: i32,

@@ -3,7 +3,7 @@ use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::{get_clock_ticks, get_username, PortInfo, TcpState};
+use crate::{PortInfo, TcpState, get_clock_ticks, get_username};
 
 // ── Data types ───────────────────────────────────────────────────────
 

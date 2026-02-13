@@ -12,15 +12,15 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 };
 use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 use windows_sys::Win32::Security::{
-    GetTokenInformation, LookupAccountSidW, TokenUser, TOKEN_QUERY, TOKEN_USER,
+    GetTokenInformation, LookupAccountSidW, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows_sys::Win32::System::Threading::{
-    GetProcessTimes, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW,
-    PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+    GetProcessTimes, OpenProcess, OpenProcessToken, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+    QueryFullProcessImageNameW,
 };
 
 use crate::{PortInfo, TcpState};

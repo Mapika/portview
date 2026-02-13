@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
-use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
 use crossterm::ExecutableCommand;
+use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
 use std::io::{self, IsTerminal, Write};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,7 +23,7 @@ use windows::get_port_infos;
 
 mod docker;
 mod tui;
-use docker::{get_docker_port_map, DockerPortMap, DockerPortOwner};
+use docker::{DockerPortMap, DockerPortOwner, get_docker_port_map};
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 compile_error!("portview only supports Linux, macOS, and Windows");
@@ -997,7 +997,7 @@ pub(crate) fn kill_process(pid: u32, force: bool) -> io::Result<&'static str> {
 #[cfg(windows)]
 pub(crate) fn kill_process(pid: u32, _force: bool) -> io::Result<&'static str> {
     use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
 
     if pid == 0 {
         return Err(io::Error::new(

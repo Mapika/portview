@@ -2,11 +2,12 @@ use std::collections::HashSet;
 use std::io;
 use std::time::{Duration, Instant};
 
+use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use crossterm::ExecutableCommand;
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -14,10 +15,9 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState,
 };
-use ratatui::Terminal;
 
 use crate::docker::{
-    get_docker_port_map, run_docker_action, run_docker_logs, DockerPortMap, DockerPortOwner,
+    DockerPortMap, DockerPortOwner, get_docker_port_map, run_docker_action, run_docker_logs,
 };
 #[cfg(target_os = "linux")]
 use crate::linux::get_port_infos;
@@ -27,8 +27,8 @@ use crate::macos::get_port_infos;
 use crate::windows::get_port_infos;
 
 use crate::{
-    chrono_free_time, format_addr, format_bytes, format_uptime, kill_process, short_container_id,
-    synthesize_docker_entries, truncate_cmd, wrap_cmd, PortInfo, StyleConfig,
+    PortInfo, StyleConfig, chrono_free_time, format_addr, format_bytes, format_uptime,
+    kill_process, short_container_id, synthesize_docker_entries, truncate_cmd, wrap_cmd,
 };
 
 // ── Sort types ───────────────────────────────────────────────────────
