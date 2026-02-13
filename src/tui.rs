@@ -1505,7 +1505,8 @@ mod tests {
     #[test]
     fn sort_column_from_index() {
         assert_eq!(SortColumn::from_index(0), Some(SortColumn::Port));
-        assert_eq!(SortColumn::from_index(7), Some(SortColumn::Command));
-        assert_eq!(SortColumn::from_index(8), None);
+        assert_eq!(SortColumn::from_index(3), Some(SortColumn::Address));
+        assert_eq!(SortColumn::from_index(8), Some(SortColumn::Command));
+        assert_eq!(SortColumn::from_index(9), None);
     }
 }
