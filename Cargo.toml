@@ -1,7 +1,7 @@
 [package]
 name = "portview"
 version = "1.2.0"
-edition = "2021"
+edition = "2024"
 description = "A diagnostic-first port viewer. See what's on your ports, then act on it."
 license = "MIT"
 repository = "https://github.com/mapika/portview"
@@ -10,8 +10,8 @@ categories = ["command-line-utilities"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = "0.30"
+crossterm = "0.29"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
