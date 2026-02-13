@@ -1,5 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 use crate::{get_username, PortInfo, TcpState};
 

@@ -37,6 +37,7 @@ use crate::{
 enum SortColumn {
     Port,
     Proto,
+    Address,
     Pid,
     User,
     Process,
@@ -50,7 +51,8 @@ impl SortColumn {
         match self {
             Self::Port => Self::Proto,
             Self::Proto => Self::Pid,
-            Self::Pid => Self::User,
+            Self::Pid => Self::Address,
+            Self::Address => Self::User,
             Self::User => Self::Process,
             Self::Process => Self::Uptime,
             Self::Uptime => Self::Mem,
@@ -64,7 +66,8 @@ impl SortColumn {
             Self::Port => Self::Command,
             Self::Proto => Self::Port,
             Self::Pid => Self::Proto,
-            Self::User => Self::Pid,
+            Self::Address => Self::Pid,
+            Self::User => Self::Address,
             Self::Process => Self::User,
             Self::Uptime => Self::Process,
             Self::Mem => Self::Uptime,
@@ -77,6 +80,7 @@ impl SortColumn {
             Self::Port => "PORT",
             Self::Proto => "PROTO",
             Self::Pid => "PID",
+            Self::Address => "ADDRESS",
             Self::User => "USER",
             Self::Process => "PROCESS",
             Self::Uptime => "UPTIME",
@@ -90,11 +94,12 @@ impl SortColumn {
             0 => Some(Self::Port),
             1 => Some(Self::Proto),
             2 => Some(Self::Pid),
-            3 => Some(Self::User),
-            4 => Some(Self::Process),
-            5 => Some(Self::Uptime),
-            6 => Some(Self::Mem),
-            7 => Some(Self::Command),
+            3 => Some(Self::Address),
+            4 => Some(Self::User),
+            5 => Some(Self::Process),
+            6 => Some(Self::Uptime),
+            7 => Some(Self::Mem),
+            8 => Some(Self::Command),
             _ => None,
         }
     }
@@ -346,6 +351,7 @@ impl App {
                 i.port.to_string().contains(&f)
                     || i.protocol.to_lowercase().contains(&f)
                     || i.pid.to_string().contains(&f)
+                    || i.local_addr.to_string().contains(&f)
                     || i.process_name.to_lowercase().contains(&f)
                     || i.command.to_lowercase().contains(&f)
                     || i.user.to_lowercase().contains(&f)
@@ -381,6 +387,7 @@ impl App {
                 }
                 SortColumn::Mem => a.memory_bytes.cmp(&b.memory_bytes),
                 SortColumn::Command => a.command.to_lowercase().cmp(&b.command.to_lowercase()),
+                SortColumn::Address => a.local_addr.cmp(&b.local_addr),
             };
             if dir == SortDirection::Desc {
                 cmp.reverse()
@@ -573,6 +580,7 @@ fn render_table(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
         Constraint::Length(6),
         Constraint::Length(5),
         Constraint::Length(7),
+        Constraint::Length(15),
         Constraint::Length(8),
         Constraint::Length(10),
         Constraint::Length(8),
@@ -590,12 +598,13 @@ fn render_table(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let [_, columns_area] = Layout::horizontal([Constraint::Length(hl_width), Constraint::Fill(0)])
         .areas(Rect::new(0, 0, area.width, 1));
     let col_rects = Layout::horizontal(widths).spacing(1).split(columns_area);
-    let cmd_width = (col_rects[7].width as usize).max(10);
+    let cmd_width = (col_rects[8].width as usize).max(10);
 
     let columns = [
         SortColumn::Port,
         SortColumn::Proto,
         SortColumn::Pid,
+        SortColumn::Address,
         SortColumn::User,
         SortColumn::Process,
         SortColumn::Uptime,
@@ -663,10 +672,13 @@ fn render_table(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
                 info.pid.to_string()
             };
 
+            let local_addr = info.local_addr.to_string();
+
             Row::new(vec![
                 Cell::from(info.port.to_string()).style(app.styles.port),
                 Cell::from(info.protocol.clone()).style(app.styles.proto),
                 Cell::from(pid_str).style(app.styles.pid),
+                Cell::from(local_addr).style(app.styles.local_addr),
                 Cell::from(info.user.clone()).style(app.styles.user),
                 Cell::from(process_text).style(process_style),
                 Cell::from(Line::from(format_uptime(info.start_time)).alignment(Alignment::Right))
@@ -1025,7 +1037,7 @@ fn handle_table_key(app: &mut App, code: KeyCode) {
         KeyCode::Char('r') => {
             app.sort_direction = app.sort_direction.toggle();
         }
-        KeyCode::Char(c @ '1'..='8') => {
+        KeyCode::Char(c @ '1'..='9') => {
             let idx = (c as usize) - ('1' as usize);
             if let Some(col) = SortColumn::from_index(idx) {
                 if app.sort_column == col {

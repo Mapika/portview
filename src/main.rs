@@ -376,6 +376,7 @@ pub(crate) struct ColorConfig {
     port: String,
     proto: String,
     pid: String,
+    local_addr: String,
     user: String,
     process: String,
     uptime: String,
@@ -389,6 +390,7 @@ impl Default for ColorConfig {
             port: "cyan".into(),
             proto: "dimmed".into(),
             pid: "yellow".into(),
+            local_addr: "grey".into(),
             user: "green".into(),
             process: "bold".into(),
             uptime: "dimmed".into(),
@@ -508,6 +510,7 @@ pub(crate) struct StyleConfig {
     pub(crate) port: ratatui::style::Style,
     pub(crate) proto: ratatui::style::Style,
     pub(crate) pid: ratatui::style::Style,
+    pub(crate) local_addr: ratatui::style::Style,
     pub(crate) user: ratatui::style::Style,
     pub(crate) process: ratatui::style::Style,
     pub(crate) uptime: ratatui::style::Style,
@@ -521,6 +524,7 @@ impl StyleConfig {
             port: color_name_to_ratatui_style(&cc.port),
             proto: color_name_to_ratatui_style(&cc.proto),
             pid: color_name_to_ratatui_style(&cc.pid),
+            local_addr: color_name_to_ratatui_style(&cc.local_addr),
             user: color_name_to_ratatui_style(&cc.user),
             process: color_name_to_ratatui_style(&cc.process),
             uptime: color_name_to_ratatui_style(&cc.uptime),
@@ -534,6 +538,7 @@ impl StyleConfig {
         Self {
             port: Style::default().fg(Color::Rgb(80, 200, 200)),
             proto: Style::default().fg(Color::Rgb(100, 110, 120)),
+            local_addr: Style::default().fg(Color::Rgb(90, 90, 90)),
             pid: Style::default().fg(Color::Rgb(220, 180, 80)),
             user: Style::default().fg(Color::Rgb(120, 200, 130)),
             process: Style::default()
@@ -565,9 +570,9 @@ fn write_styled(w: &mut impl Write, text: &str, color_name: &str, use_color: boo
     let _ = w.execute(SetAttribute(Attribute::Reset));
 }
 
-/// Compute the widths of the 7 non-command columns based on data content.
+/// Compute the widths of the 8 non-command columns based on data content.
 /// Returns [port_w, proto_w, pid_w, user_w, process_w, uptime_w, mem_w].
-fn measure_column_widths(infos: &[PortInfo]) -> [usize; 7] {
+fn measure_column_widths(infos: &[PortInfo]) -> [usize; 8] {
     let port_w = infos
         .iter()
         .map(|i| i.port.to_string().len())
@@ -586,6 +591,12 @@ fn measure_column_widths(infos: &[PortInfo]) -> [usize; 7] {
         .max()
         .unwrap_or(0)
         .max(3);
+    let addr_w = infos
+        .iter()
+        .map(|i| i.local_addr.to_string().len())
+        .max()
+        .unwrap_or(9)
+        .max(12);
     let user_w = infos.iter().map(|i| i.user.len()).max().unwrap_or(0).max(4);
     let proc_w = infos
         .iter()
@@ -605,7 +616,9 @@ fn measure_column_widths(infos: &[PortInfo]) -> [usize; 7] {
         .max()
         .unwrap_or(0)
         .max(3);
-    [port_w, proto_w, pid_w, user_w, proc_w, uptime_w, mem_w]
+    [
+        port_w, proto_w, pid_w, addr_w, user_w, proc_w, uptime_w, mem_w,
+    ]
 }
 
 fn write_table_border(out: &mut impl Write, widths: &[usize], left: &str, mid: &str, right: &str) {
@@ -637,13 +650,13 @@ fn display_table(
     let mut out = io::stdout();
 
     let col_widths = measure_column_widths(infos);
-    let actual_cmd_w = cmd_width.max(7);
+    let actual_cmd_w = cmd_width.max(8);
 
-    let mut widths = [0usize; 8];
-    widths[..7].copy_from_slice(&col_widths);
-    widths[7] = actual_cmd_w;
+    let mut widths = [0usize; 9];
+    widths[..8].copy_from_slice(&col_widths);
+    widths[8] = actual_cmd_w;
     let headers = [
-        "PORT", "PROTO", "PID", "USER", "PROCESS", "UPTIME", "MEM", "COMMAND",
+        "PORT", "PROTO", "PID", "ADDR", "USER", "PROCESS", "UPTIME", "MEM", "COMMAND",
     ];
 
     // Top border
@@ -672,6 +685,7 @@ fn display_table(
         &colors.port,
         &colors.proto,
         &colors.pid,
+        &colors.local_addr,
         &colors.user,
         &colors.process,
         &colors.uptime,
@@ -691,6 +705,7 @@ fn display_table(
             info.port.to_string(),
             info.protocol.clone(),
             pid_str,
+            info.local_addr.to_string(),
             info.user.clone(),
             info.process_name.clone(),
             uptime_str,
@@ -706,11 +721,11 @@ fn display_table(
         for (line_idx, cmd_line) in cmd_lines.iter().enumerate() {
             let _ = write!(out, "│");
 
-            for (i, (&w, val)) in widths.iter().take(7).zip(base_values.iter()).enumerate() {
+            for (i, (&w, val)) in widths.iter().take(8).zip(base_values.iter()).enumerate() {
                 let _ = write!(out, " ");
                 let current = if line_idx == 0 { val.as_str() } else { "" };
                 // Right-align UPTIME (5) and MEM (6) columns
-                let padded = if i == 5 || i == 6 {
+                let padded = if i == 6 || i == 7 {
                     format!("{:>width$}", current, width = w)
                 } else {
                     format!("{:<width$}", current, width = w)
@@ -721,7 +736,7 @@ fn display_table(
 
             let _ = write!(out, " ");
             let padded_cmd = format!("{:<width$}", cmd_line, width = actual_cmd_w);
-            write_styled(&mut out, &padded_cmd, color_names[7], use_color);
+            write_styled(&mut out, &padded_cmd, color_names[8], use_color);
             let _ = writeln!(out, " │");
         }
     }
@@ -1365,7 +1380,7 @@ fn compute_cmd_width(infos: &[PortInfo]) -> usize {
     let data_width: usize = col_widths.iter().sum();
 
     // Box-drawing style: 9 vertical borders + 1 space padding on each side of each of 8 columns
-    let chrome = 9 + (8 * 2);
+    let chrome = 10 + (9 * 2);
 
     cols.saturating_sub(data_width + chrome).max(20)
 }
