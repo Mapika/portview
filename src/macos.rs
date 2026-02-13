@@ -18,7 +18,7 @@ const MAXPATHLEN: u32 = 1024;
 
 // ── FFI declarations ─────────────────────────────────────────────────
 
-extern "C" {
+unsafe extern "C" {
     fn proc_listpids(r#type: u32, typeinfo: u32, buffer: *mut libc::c_void, buffersize: i32)
     -> i32;
     fn proc_pidinfo(
