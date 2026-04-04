@@ -34,7 +34,7 @@ use crate::{
 // ── Sort types ───────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum SortColumn {
+pub enum SortColumn {
     Port,
     Proto,
     Address,
@@ -86,6 +86,21 @@ impl SortColumn {
             Self::Uptime => "UPTIME",
             Self::Mem => "MEM",
             Self::Command => "COMMAND",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "port" => Some(Self::Port),
+            "proto" | "protocol" => Some(Self::Proto),
+            "pid" => Some(Self::Pid),
+            "address" | "addr" => Some(Self::Address),
+            "user" => Some(Self::User),
+            "process" | "name" => Some(Self::Process),
+            "uptime" => Some(Self::Uptime),
+            "mem" | "memory" => Some(Self::Mem),
+            "command" | "cmd" => Some(Self::Command),
+            _ => None,
         }
     }
 
@@ -235,6 +250,7 @@ pub struct App {
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         target: Option<&str>,
         show_all: bool,
@@ -243,6 +259,7 @@ impl App {
         no_color: bool,
         docker_enabled: bool,
         styles: StyleConfig,
+        sort_column: SortColumn,
     ) -> Self {
         let theme = if no_color {
             TuiTheme::no_color()
@@ -267,7 +284,7 @@ impl App {
             last_refresh: Instant::now() - Duration::from_secs(2), // force immediate refresh
             detail_index: 0,
             status_message: None,
-            sort_column: SortColumn::Port,
+            sort_column,
             sort_direction: SortDirection::Asc,
         };
         app.refresh_data();
@@ -512,6 +529,11 @@ fn build_footer_line(app: &App) -> Line<'_> {
             Span::styled(" cancel ", app.theme.footer_text),
         ])
     } else {
+        let all_label = if app.show_all {
+            " all ports  "
+        } else {
+            " listening  "
+        };
         let mut spans = vec![
             Span::styled(" j/k", app.theme.footer_key),
             Span::styled(" move  ", app.theme.footer_text),
@@ -521,10 +543,10 @@ fn build_footer_line(app: &App) -> Line<'_> {
             Span::styled(" action  ", app.theme.footer_text),
             Span::styled("/", app.theme.footer_key),
             Span::styled(" filter  ", app.theme.footer_text),
-            Span::styled("</>/r", app.theme.footer_key),
+            Span::styled("\u{2190}/\u{2192}/r", app.theme.footer_key),
             Span::styled(" sort  ", app.theme.footer_text),
             Span::styled("a", app.theme.footer_key),
-            Span::styled(" all  ", app.theme.footer_text),
+            Span::styled(all_label, app.theme.footer_text),
             Span::styled("q", app.theme.footer_key),
             Span::styled(" quit  ", app.theme.footer_text),
         ];
@@ -1029,10 +1051,10 @@ fn handle_table_key(app: &mut App, code: KeyCode) {
             app.show_all = !app.show_all;
             app.refresh_data();
         }
-        KeyCode::Char('<') => {
+        KeyCode::Char('<') | KeyCode::Left => {
             app.sort_column = app.sort_column.prev();
         }
-        KeyCode::Char('>') => {
+        KeyCode::Char('>') | KeyCode::Right => {
             app.sort_column = app.sort_column.next();
         }
         KeyCode::Char('r') => {
@@ -1191,6 +1213,7 @@ fn handle_docker_popup_key(app: &mut App, code: KeyCode) {
 
 // ── Main entry point ─────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_tui(
     target: Option<&str>,
     show_all: bool,
@@ -1199,6 +1222,7 @@ pub fn run_tui(
     no_color: bool,
     docker: bool,
     styles: StyleConfig,
+    sort: Option<SortColumn>,
 ) -> io::Result<()> {
     // Setup terminal
     enable_raw_mode()?;
@@ -1209,7 +1233,17 @@ pub fn run_tui(
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let mut app = App::new(target, show_all, wide, force, no_color, docker, styles);
+    let sort_column = sort.unwrap_or(SortColumn::Port);
+    let mut app = App::new(
+        target,
+        show_all,
+        wide,
+        force,
+        no_color,
+        docker,
+        styles,
+        sort_column,
+    );
 
     let tick_rate = Duration::from_secs(1);
 

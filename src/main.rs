@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser};
 use crossterm::ExecutableCommand;
 use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
 use std::io::{self, IsTerminal, Write};
@@ -21,103 +21,16 @@ mod windows;
 #[cfg(target_os = "windows")]
 use windows::get_port_infos;
 
+mod cli;
 mod docker;
 mod tui;
+use cli::{Cli, Command};
 use docker::{DockerPortMap, DockerPortOwner, get_docker_port_map};
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 compile_error!("portview only supports Linux, macOS, and Windows");
 
-// ── CLI ──────────────────────────────────────────────────────────────
-
-#[derive(Parser)]
-#[command(
-    name = "portview",
-    about = "See what's on your ports, then act on it.",
-    version,
-    after_help = "Examples:\n  portview                   Show all listening ports\n  portview 3000              Inspect port 3000 in detail\n  portview watch --docker    Interactive watch with Docker context\n  portview kill 3000 --force Force-kill process(es) on port 3000\n\nLegacy flags (--watch, --kill) are still supported."
-)]
-struct Cli {
-    /// UX-first subcommands
-    #[command(subcommand)]
-    command: Option<Command>,
-
-    /// Port number to inspect, or 'scan' to list all
-    target: Option<String>,
-
-    /// Kill the process on the specified port
-    #[arg(short, long, hide = true)]
-    kill: Option<u16>,
-
-    /// Force kill (SIGKILL instead of SIGTERM)
-    #[arg(short, long)]
-    force: bool,
-
-    /// Show all ports including non-listening
-    #[arg(short, long)]
-    all: bool,
-
-    /// Output as JSON
-    #[arg(long)]
-    json: bool,
-
-    /// Enrich output with Docker container ownership when available
-    #[arg(long)]
-    docker: bool,
-
-    /// Don't use colors
-    #[arg(long)]
-    no_color: bool,
-
-    /// Live-refresh the display every second
-    #[arg(short, long, hide = true)]
-    watch: bool,
-
-    /// Don't truncate the command column (use full terminal width)
-    #[arg(long)]
-    wide: bool,
-}
-
-#[derive(Subcommand, Debug)]
-enum Command {
-    /// Live-refresh the display (interactive TUI by default)
-    Watch {
-        /// Port number or process name filter
-        target: Option<String>,
-        /// Show all ports including non-listening
-        #[arg(short, long)]
-        all: bool,
-        /// Output as JSON (streaming in watch mode)
-        #[arg(long)]
-        json: bool,
-        /// Enable Docker ownership context
-        #[arg(long)]
-        docker: bool,
-        /// Force kill (default for d in TUI / kill prompts)
-        #[arg(short, long)]
-        force: bool,
-        /// Don't truncate the command column
-        #[arg(long)]
-        wide: bool,
-        /// Disable all colors
-        #[arg(long)]
-        no_color: bool,
-    },
-    /// Kill process(es) bound to a port
-    Kill {
-        /// Port to kill
-        port: u16,
-        /// Force kill (SIGKILL / TerminateProcess)
-        #[arg(short, long)]
-        force: bool,
-        /// Show Docker ownership context before killing
-        #[arg(long)]
-        docker: bool,
-        /// Disable all colors
-        #[arg(long)]
-        no_color: bool,
-    },
-}
+// ── CLI (defined in src/cli.rs) ─────────────────────────────────────
 
 // ── Data types ───────────────────────────────────────────────────────
 
@@ -1203,6 +1116,7 @@ struct RunConfig {
     docker: bool,
     watch: bool,
     wide: bool,
+    sort: Option<tui::SortColumn>,
 }
 
 impl RunConfig {
@@ -1215,6 +1129,7 @@ impl RunConfig {
             docker: cli.docker,
             watch: cli.watch,
             wide: cli.wide,
+            sort: None,
         }
     }
 }
@@ -1292,6 +1207,7 @@ fn run_watch_mode(config: &RunConfig, no_color: bool, use_color: bool, colors: &
             no_color,
             config.docker,
             style_config,
+            config.sort,
         ) {
             eprintln!("TUI error: {}", e);
             std::process::exit(1);
@@ -1315,7 +1231,17 @@ fn main() {
                 force,
                 wide,
                 no_color,
+                sort,
             } => {
+                let sort_col = sort.as_deref().map(|s| {
+                    tui::SortColumn::from_name(s).unwrap_or_else(|| {
+                        eprintln!(
+                            "error: unknown sort column '{}'. Valid values: port, proto, pid, address, user, process, uptime, mem, command",
+                            s
+                        );
+                        std::process::exit(2);
+                    })
+                });
                 let use_color = !no_color && atty_stdout();
                 let config = RunConfig {
                     target: target.clone(),
@@ -1325,6 +1251,7 @@ fn main() {
                     docker: *docker,
                     watch: true,
                     wide: *wide,
+                    sort: sort_col,
                 };
                 run_watch_mode(&config, *no_color, use_color, &colors);
                 return;
@@ -1337,6 +1264,10 @@ fn main() {
             } => {
                 let use_color = !no_color && atty_stdout();
                 run_kill_mode(*port, *force, *docker, use_color);
+                return;
+            }
+            Command::Completions { shell } => {
+                clap_complete::generate(*shell, &mut Cli::command(), "portview", &mut io::stdout());
                 return;
             }
         }
