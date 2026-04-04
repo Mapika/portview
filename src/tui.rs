@@ -248,6 +248,8 @@ pub struct App {
     sort_column: SortColumn,
     sort_direction: SortDirection,
     tree_mode: bool,
+    remote_host: Option<String>,
+    ssh_opts: Vec<String>,
 }
 
 impl App {
@@ -288,6 +290,8 @@ impl App {
             sort_column,
             sort_direction: SortDirection::Asc,
             tree_mode: false,
+            remote_host: None,
+            ssh_opts: Vec::new(),
         };
         app.refresh_data();
         if !app.display_ports().is_empty() {
@@ -518,8 +522,13 @@ impl App {
 // ── Rendering ────────────────────────────────────────────────────────
 
 fn build_title_line(app: &App, port_count: usize) -> Line<'_> {
+    let title = if let Some(host) = &app.remote_host {
+        format!(" portview@{}", host)
+    } else {
+        " portview".to_string()
+    };
     let mut spans = vec![
-        Span::styled(" portview", app.theme.title),
+        Span::styled(title, app.theme.title),
         Span::styled("  ", app.theme.footer_text),
         Span::styled(
             format!(
@@ -1195,7 +1204,7 @@ fn handle_table_key(app: &mut App, code: KeyCode) {
                 app.mode = AppMode::Detail;
             }
         }
-        KeyCode::Char('d') => {
+        KeyCode::Char('d') if app.remote_host.is_none() => {
             if let Some(info) = app.selected_port().cloned() {
                 if info.pid == 0 {
                     app.popup = Some(Popup::Docker(DockerPopup {
@@ -1213,7 +1222,7 @@ fn handle_table_key(app: &mut App, code: KeyCode) {
                 }
             }
         }
-        KeyCode::Char('D') => {
+        KeyCode::Char('D') if app.remote_host.is_none() => {
             if let Some(info) = app.selected_port().cloned() {
                 if info.pid == 0 {
                     app.popup = Some(Popup::Docker(DockerPopup {
@@ -1235,7 +1244,7 @@ fn handle_table_key(app: &mut App, code: KeyCode) {
             app.mode = AppMode::FilterInput;
             app.filter_text.clear();
         }
-        KeyCode::Char('a') => {
+        KeyCode::Char('a') if app.remote_host.is_none() => {
             app.show_all = !app.show_all;
             app.refresh_data();
         }
@@ -1270,7 +1279,7 @@ fn handle_detail_key(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Esc => app.mode = AppMode::Table,
         KeyCode::Char('q') => app.should_quit = true,
-        KeyCode::Char('d') => {
+        KeyCode::Char('d') if app.remote_host.is_none() => {
             let ports = app.display_ports();
             if let Some(info) = ports.get(app.detail_index) {
                 if info.pid == 0 {
@@ -1289,7 +1298,7 @@ fn handle_detail_key(app: &mut App, code: KeyCode) {
                 }
             }
         }
-        KeyCode::Char('D') => {
+        KeyCode::Char('D') if app.remote_host.is_none() => {
             let ports = app.display_ports();
             if let Some(info) = ports.get(app.detail_index) {
                 if info.pid == 0 {
@@ -1473,6 +1482,128 @@ pub fn run_tui(
     Ok(())
 }
 
+// ── Remote TUI (SSH pipe mode) ───────────────────────────────────────
+
+pub fn run_remote_tui(
+    host: &str,
+    ssh_opts: Vec<String>,
+    mut child: std::process::Child,
+    no_color: bool,
+) -> io::Result<()> {
+    use std::io::BufRead;
+
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    stdout.execute(EnterAlternateScreen)?;
+
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
+
+    let theme = if no_color {
+        TuiTheme::no_color()
+    } else {
+        TuiTheme::default_btop()
+    };
+    let styles = if no_color {
+        StyleConfig::default()
+    } else {
+        StyleConfig::btop_default()
+    };
+
+    let mut app = App {
+        ports: Vec::new(),
+        docker_enabled: false,
+        docker_map: DockerPortMap::default(),
+        table_state: TableState::default(),
+        mode: AppMode::Table,
+        show_all: false,
+        filter_text: String::new(),
+        popup: None,
+        target: None,
+        styles,
+        theme,
+        wide: false,
+        default_force: false,
+        should_quit: false,
+        last_refresh: Instant::now() - Duration::from_secs(2),
+        detail_index: 0,
+        status_message: None,
+        sort_column: SortColumn::Port,
+        sort_direction: SortDirection::Asc,
+        tree_mode: false,
+        remote_host: Some(host.to_string()),
+        ssh_opts,
+    };
+
+    let child_stdout = child.stdout.take().expect("piped stdout");
+    let mut reader = std::io::BufReader::new(child_stdout);
+    let mut line_buf = String::new();
+
+    let tick_rate = Duration::from_millis(100);
+
+    loop {
+        terminal.draw(|frame| render(frame, &mut app))?;
+
+        if app.should_quit {
+            break;
+        }
+
+        // Try to read data from SSH pipe when due
+        if app.last_refresh.elapsed() >= Duration::from_secs(1) {
+            line_buf.clear();
+            match reader.read_line(&mut line_buf) {
+                Ok(0) => {
+                    // EOF
+                    app.status_message = Some(("Connection lost".to_string(), Instant::now()));
+                    app.should_quit = true;
+                    continue;
+                }
+                Ok(_) => {
+                    if let Ok(ports) = crate::ssh::parse_port_json(line_buf.trim()) {
+                        app.ports = ports;
+                        app.last_refresh = Instant::now();
+                        let count = app.display_ports().len();
+                        if count == 0 {
+                            app.table_state.select(None);
+                        } else if let Some(sel) = app.table_state.selected() {
+                            if sel >= count {
+                                app.table_state.select(Some(count - 1));
+                            }
+                        } else {
+                            app.table_state.select(Some(0));
+                        }
+                    }
+                }
+                Err(_) => {
+                    app.status_message = Some(("Read error".to_string(), Instant::now()));
+                    app.should_quit = true;
+                    continue;
+                }
+            }
+        }
+
+        // Handle key events
+        if event::poll(tick_rate)?
+            && let Event::Key(key) = event::read()?
+        {
+            if key.kind == KeyEventKind::Press {
+                handle_key(&mut app, key.code, key.modifiers);
+            }
+        }
+    }
+
+    // Cleanup SSH process
+    let _ = child.kill();
+    let _ = child.wait();
+
+    disable_raw_mode()?;
+    terminal.backend_mut().execute(LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    Ok(())
+}
+
 // ── Tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1521,6 +1652,8 @@ mod tests {
             sort_column: SortColumn::Port,
             sort_direction: SortDirection::Asc,
             tree_mode: false,
+            remote_host: None,
+            ssh_opts: Vec::new(),
         }
     }
 

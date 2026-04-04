@@ -113,9 +113,26 @@ fn run_ssh_passthrough(ssh: &SshCommand, remote_args: &[&str]) {
     }
 }
 
-fn run_ssh_tui(_ssh: &SshCommand, _remote_args: &[&str], _use_color: bool) {
-    eprintln!("Remote TUI mode coming soon. Use: portview ssh <host>");
-    std::process::exit(1);
+fn run_ssh_tui(ssh: &SshCommand, remote_args: &[&str], use_color: bool) {
+    let mut cmd = ssh.build(remote_args);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to start SSH: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let no_color = !use_color;
+    if let Err(e) =
+        crate::tui::run_remote_tui(&ssh.destination, ssh.ssh_opts.clone(), child, no_color)
+    {
+        eprintln!("TUI error: {}", e);
+        std::process::exit(1);
+    }
 }
 
 fn run_ssh_scan(ssh: &SshCommand, remote_args: &[&str], use_color: bool) {
