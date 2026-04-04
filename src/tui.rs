@@ -1613,10 +1613,9 @@ pub fn run_remote_tui(
         // Handle key events
         if event::poll(tick_rate)?
             && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
         {
-            if key.kind == KeyEventKind::Press {
-                handle_key(&mut app, key.code, key.modifiers);
-            }
+            handle_key(&mut app, key.code, key.modifiers);
         }
     }
 

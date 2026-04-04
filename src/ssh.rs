@@ -220,11 +220,11 @@ fn split_objects(s: &str) -> Result<Vec<&str>, String> {
             }
             '}' => {
                 depth -= 1;
-                if depth == 0 {
-                    if let Some(s_pos) = start {
-                        objects.push(&s[s_pos..=i]);
-                        start = None;
-                    }
+                if depth == 0
+                    && let Some(s_pos) = start
+                {
+                    objects.push(&s[s_pos..=i]);
+                    start = None;
                 }
             }
             _ => {}
