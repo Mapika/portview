@@ -94,6 +94,22 @@ jobs:
           .\target\${{ matrix.target }}\release\portview.exe ; exit 0
         shell: pwsh
 
+      - name: Package completions and man page
+        if: matrix.name == 'linux-x86_64'
+        run: |
+          OUT_DIR=$(find target/${{ matrix.target }}/build -path '*/portview-*/out' -type d | head -1)
+          mkdir -p dist-extras
+          cp -r "$OUT_DIR/completions" dist-extras/
+          cp -r "$OUT_DIR/man" dist-extras/
+          tar czf portview-completions.tar.gz -C dist-extras completions man
+
+      - name: Upload extras
+        if: matrix.name == 'linux-x86_64'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: portview-completions
+          path: portview-completions.tar.gz
+
       - name: Package (Unix)
         if: runner.os != 'Windows'
         run: |
@@ -124,6 +140,7 @@ jobs:
 
       - name: Generate checksums
         run: sha256sum portview-*.tar.gz portview-*.zip > SHA256SUMS
+        # Note: portview-completions.tar.gz is included in the glob above
 
       - name: Create release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1

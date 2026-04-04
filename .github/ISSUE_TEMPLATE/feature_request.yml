@@ -1,0 +1,25 @@
+name: Feature Request
+description: Suggest an improvement or new feature
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What would you like?
+      description: Describe the feature or improvement.
+    validations:
+      required: true
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case
+      description: How would you use this? What problem does it solve?
+  - type: dropdown
+    id: os
+    attributes:
+      label: Which OS are you on?
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - All / not OS-specific
