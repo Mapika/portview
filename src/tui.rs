@@ -417,7 +417,11 @@ impl App {
         result
     }
 
-    fn tree_ordered_ports(&self) -> Vec<(&PortInfo, u16, bool)> {
+    /// Returns tree-ordered ports with ancestor path info.
+    /// Each entry is (port_info, ancestor_is_last) where ancestor_is_last[i]
+    /// indicates whether the ancestor at depth i was the last sibling.
+    /// Empty vec = root node.
+    fn tree_ordered_ports(&self) -> Vec<(&PortInfo, Vec<bool>)> {
         let filtered = self.filtered_ports();
         let pid_set: std::collections::HashSet<u32> = filtered.iter().map(|p| p.pid).collect();
         let mut children_of: std::collections::HashMap<u32, Vec<&PortInfo>> =
@@ -437,32 +441,26 @@ impl App {
             children.sort_by_key(|p| p.port);
         }
 
-        let mut result: Vec<(&PortInfo, u16, bool)> = Vec::new();
+        let mut result: Vec<(&PortInfo, Vec<bool>)> = Vec::new();
         fn walk<'a>(
             pid: u32,
             info: &'a PortInfo,
-            depth: u16,
-            is_last: bool,
+            path: &[bool],
             children_of: &std::collections::HashMap<u32, Vec<&'a PortInfo>>,
-            result: &mut Vec<(&'a PortInfo, u16, bool)>,
+            result: &mut Vec<(&'a PortInfo, Vec<bool>)>,
         ) {
-            result.push((info, depth, is_last));
+            result.push((info, path.to_vec()));
             if let Some(children) = children_of.get(&pid) {
                 let len = children.len();
                 for (i, child) in children.iter().enumerate() {
-                    walk(
-                        child.pid,
-                        child,
-                        depth + 1,
-                        i == len - 1,
-                        children_of,
-                        result,
-                    );
+                    let mut child_path = path.to_vec();
+                    child_path.push(i == len - 1);
+                    walk(child.pid, child, &child_path, children_of, result);
                 }
             }
         }
         for root in &roots {
-            walk(root.pid, root, 0, true, &children_of, &mut result);
+            walk(root.pid, root, &[], &children_of, &mut result);
         }
         result
     }
@@ -471,7 +469,7 @@ impl App {
         if self.tree_mode {
             self.tree_ordered_ports()
                 .into_iter()
-                .map(|(p, _, _)| p)
+                .map(|(p, _)| p)
                 .collect()
         } else {
             self.sorted_ports()
@@ -665,12 +663,12 @@ fn render(frame: &mut ratatui::Frame, app: &mut App) {
 }
 
 fn render_table(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let tree_data: Vec<(&PortInfo, u16, bool)> = if app.tree_mode {
+    let tree_data: Vec<(&PortInfo, Vec<bool>)> = if app.tree_mode {
         app.tree_ordered_ports()
     } else {
         app.display_ports()
             .into_iter()
-            .map(|p| (p, 0u16, true))
+            .map(|p| (p, Vec::new()))
             .collect()
     };
     let wide = app.wide;
@@ -732,7 +730,7 @@ fn render_table(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
 
     let rows: Vec<Row> = tree_data
         .iter()
-        .map(|(info, depth, is_last)| {
+        .map(|(info, path)| {
             let mut command_text = info.command.clone();
             if app.docker_enabled
                 && info.pid != 0
@@ -761,12 +759,18 @@ fn render_table(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
             } else {
                 app.styles.process
             };
-            let tree_prefix = if app.tree_mode && *depth > 0 {
+            let tree_prefix = if app.tree_mode && !path.is_empty() {
                 let mut prefix = String::new();
-                for _ in 0..(*depth - 1) {
-                    prefix.push_str("\u{2502}   "); // │ + 3 spaces
+                // For each ancestor level (except the last), draw │ or space
+                for &ancestor_is_last in &path[..path.len() - 1] {
+                    if ancestor_is_last {
+                        prefix.push_str("    "); // ancestor was last — no vertical line
+                    } else {
+                        prefix.push_str("\u{2502}   "); // │ + 3 spaces
+                    }
                 }
-                if *is_last {
+                // Current node connector
+                if *path.last().unwrap() {
                     prefix.push_str("\u{2514}\u{2500}\u{2500} "); // └──
                 } else {
                     prefix.push_str("\u{251c}\u{2500}\u{2500} "); // ├──
