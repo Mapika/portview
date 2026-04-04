@@ -1204,7 +1204,7 @@ fn handle_table_key(app: &mut App, code: KeyCode) {
                 app.mode = AppMode::Detail;
             }
         }
-        KeyCode::Char('d') if app.remote_host.is_none() => {
+        KeyCode::Char('d') => {
             if let Some(info) = app.selected_port().cloned() {
                 if info.pid == 0 {
                     app.popup = Some(Popup::Docker(DockerPopup {
@@ -1222,7 +1222,7 @@ fn handle_table_key(app: &mut App, code: KeyCode) {
                 }
             }
         }
-        KeyCode::Char('D') if app.remote_host.is_none() => {
+        KeyCode::Char('D') => {
             if let Some(info) = app.selected_port().cloned() {
                 if info.pid == 0 {
                     app.popup = Some(Popup::Docker(DockerPopup {
@@ -1279,7 +1279,7 @@ fn handle_detail_key(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Esc => app.mode = AppMode::Table,
         KeyCode::Char('q') => app.should_quit = true,
-        KeyCode::Char('d') if app.remote_host.is_none() => {
+        KeyCode::Char('d') => {
             let ports = app.display_ports();
             if let Some(info) = ports.get(app.detail_index) {
                 if info.pid == 0 {
@@ -1298,7 +1298,7 @@ fn handle_detail_key(app: &mut App, code: KeyCode) {
                 }
             }
         }
-        KeyCode::Char('D') if app.remote_host.is_none() => {
+        KeyCode::Char('D') => {
             let ports = app.display_ports();
             if let Some(info) = ports.get(app.detail_index) {
                 if info.pid == 0 {
@@ -1356,16 +1356,43 @@ fn handle_kill_popup_key(app: &mut App, code: KeyCode) {
     match code {
         KeyCode::Char('y') | KeyCode::Enter => {
             if let Some(Popup::Kill(popup)) = app.popup.take() {
-                app.status_message = Some((
-                    match kill_process(popup.pid, popup.force) {
-                        Ok("TerminateProcess") => {
-                            format!("Terminated PID {}", popup.pid)
+                if let Some(host) = &app.remote_host.clone() {
+                    // Remote kill via SSH
+                    let ssh = crate::ssh::SshCommand {
+                        destination: host.clone(),
+                        ssh_opts: app.ssh_opts.clone(),
+                    };
+                    let port_str = popup.port.to_string();
+                    let args: Vec<&str> = if popup.force {
+                        vec!["kill", &port_str, "--force"]
+                    } else {
+                        vec!["kill", &port_str]
+                    };
+                    match ssh.run_oneshot(&args) {
+                        Ok(_) => {
+                            app.status_message = Some((
+                                format!("Killed remote port {}", popup.port),
+                                Instant::now(),
+                            ));
                         }
-                        Ok(action) => format!("Sent {} to PID {}", action, popup.pid),
-                        Err(err) => format!("Failed to kill PID {}: {}", popup.pid, err),
-                    },
-                    Instant::now(),
-                ));
+                        Err(e) => {
+                            app.status_message =
+                                Some((format!("Kill failed: {}", e), Instant::now()));
+                        }
+                    }
+                } else {
+                    // Local kill
+                    app.status_message = Some((
+                        match kill_process(popup.pid, popup.force) {
+                            Ok("TerminateProcess") => {
+                                format!("Terminated PID {}", popup.pid)
+                            }
+                            Ok(action) => format!("Sent {} to PID {}", action, popup.pid),
+                            Err(err) => format!("Failed to kill PID {}: {}", popup.pid, err),
+                        },
+                        Instant::now(),
+                    ));
+                }
                 // Refresh immediately to reflect killed process
                 app.refresh_data();
             }
