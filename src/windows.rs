@@ -450,6 +450,8 @@ pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
             continue; // System Idle Process
         }
 
+        let ppid = ppid_map.get(&pid).copied().unwrap_or(0);
+
         // Open process handle — skip protected/system processes we can't access
         let handle = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid) };
         if handle.is_null() {
@@ -462,7 +464,7 @@ pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
                         port: sock.local_port,
                         protocol: sock.protocol.clone(),
                         pid,
-                        ppid: ppid_map.get(&pid).copied().unwrap_or(0),
+                        ppid,
                         process_name: String::new(),
                         command: String::new(),
                         user: String::new(),
@@ -488,7 +490,7 @@ pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
                     port: sock.local_port,
                     protocol: sock.protocol.clone(),
                     pid,
-                    ppid: ppid_map.get(&pid).copied().unwrap_or(0),
+                    ppid,
                     process_name: name.clone(),
                     command: if path.is_empty() {
                         format!("[{}]", name)
@@ -526,7 +528,7 @@ pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
                 port: sock.local_port,
                 protocol: sock.protocol.clone(),
                 pid,
-                ppid: ppid_map.get(&pid).copied().unwrap_or(0),
+                ppid,
                 process_name: name.clone(),
                 command: command.clone(),
                 user: user.clone(),

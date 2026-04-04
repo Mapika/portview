@@ -882,6 +882,21 @@ fn prompt_kill(pid: u32, force: bool) -> bool {
     false
 }
 
+pub(crate) fn get_process_cwd(pid: u32) -> String {
+    #[cfg(target_os = "linux")]
+    {
+        linux::get_process_cwd(pid)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::get_process_cwd(pid)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows::get_process_cwd(pid)
+    }
+}
+
 #[cfg(unix)]
 pub(crate) fn kill_process(pid: u32, force: bool) -> io::Result<&'static str> {
     if pid == 0 {

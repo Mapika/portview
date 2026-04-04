@@ -517,9 +517,7 @@ impl App {
 
 // ── Rendering ────────────────────────────────────────────────────────
 
-fn build_title_line(app: &App) -> Line<'_> {
-    let visible_ports = app.display_ports();
-    let port_count = visible_ports.len();
+fn build_title_line(app: &App, port_count: usize) -> Line<'_> {
     let mut spans = vec![
         Span::styled(" portview", app.theme.title),
         Span::styled("  ", app.theme.footer_text),
@@ -556,7 +554,8 @@ fn build_title_line(app: &App) -> Line<'_> {
     }
 
     if app.docker_enabled {
-        let mapped_count = visible_ports
+        let mapped_count = app
+            .ports
             .iter()
             .filter(|info| app.docker_map.contains_key(&info.port))
             .count();
@@ -636,7 +635,8 @@ fn render(frame: &mut ratatui::Frame, app: &mut App) {
     // Clear entire frame to prevent popup artifacts
     frame.render_widget(Clear, area);
 
-    let title_line = build_title_line(app);
+    let port_count = app.display_ports().len();
+    let title_line = build_title_line(app, port_count);
     let footer_line = build_footer_line(app);
 
     let block = Block::default()
@@ -853,22 +853,7 @@ fn render_detail(frame: &mut ratatui::Frame, app: &App, area: Rect) {
 
     let label_style = app.theme.footer_text;
 
-    let cmd_display = if info.command.len() > 60 {
-        let mut wrapped = String::new();
-        let mut pos = 0;
-        let width = 60;
-        while pos < info.command.len() {
-            let end = (pos + width).min(info.command.len());
-            if pos > 0 {
-                wrapped.push_str("\n            ");
-            }
-            wrapped.push_str(&info.command[pos..end]);
-            pos = end;
-        }
-        wrapped
-    } else {
-        info.command.clone()
-    };
+    let cmd_display = wrap_cmd(&info.command, 60).join("\n            ");
 
     let rows: Vec<(&str, String)> = if is_docker {
         vec![
@@ -897,21 +882,9 @@ fn render_detail(frame: &mut ratatui::Frame, app: &App, area: Rect) {
         ]));
     }
 
-    // Working directory (platform-specific)
-    #[cfg(target_os = "linux")]
+    // Working directory
     if !is_docker {
-        let cwd = crate::linux::get_process_cwd(info.pid);
-        if !cwd.is_empty() {
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(format!("{:<10}", "Cwd:"), label_style),
-                Span::raw(cwd),
-            ]));
-        }
-    }
-    #[cfg(target_os = "macos")]
-    if !is_docker {
-        let cwd = crate::macos::get_process_cwd(info.pid);
+        let cwd = crate::get_process_cwd(info.pid);
         if !cwd.is_empty() {
             lines.push(Line::from(vec![
                 Span::raw("  "),
