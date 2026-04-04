@@ -23,6 +23,7 @@ use windows::get_port_infos;
 
 mod cli;
 mod docker;
+mod doctor;
 mod tui;
 use cli::{Cli, Command};
 use docker::{DockerPortMap, DockerPortOwner, get_docker_port_map};
@@ -1268,6 +1269,11 @@ fn main() {
             }
             Command::Completions { shell } => {
                 clap_complete::generate(*shell, &mut Cli::command(), "portview", &mut io::stdout());
+                return;
+            }
+            Command::Doctor { json, no_color } => {
+                let use_color = !no_color && atty_stdout();
+                doctor::run_doctor(use_color, *json);
                 return;
             }
         }

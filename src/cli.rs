@@ -96,4 +96,13 @@ pub enum Command {
         /// Shell to generate completions for (bash, zsh, fish, elvish, powershell)
         shell: clap_complete::Shell,
     },
+    /// Diagnose common port problems
+    Doctor {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        /// Disable all colors
+        #[arg(long)]
+        no_color: bool,
+    },
 }
