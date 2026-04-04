@@ -334,7 +334,7 @@ impl Default for ColorConfig {
 }
 
 impl ColorConfig {
-    fn from_env() -> Self {
+    pub(crate) fn from_env() -> Self {
         let mut config = Self::default();
         let val = match std::env::var("PORTVIEW_COLORS") {
             Ok(v) => v,
@@ -676,6 +676,39 @@ fn display_table(
 
     // Bottom border
     write_table_border(&mut out, &widths, "╰", "┴", "╯");
+}
+
+/// Public wrapper for displaying a port table — used by ssh.rs for remote scan output.
+pub(crate) fn display_port_table(infos: &[PortInfo], use_color: bool, colors: &ColorConfig) {
+    let cmd_width = compute_cmd_width(infos);
+    let mut infos_owned: Vec<PortInfo> = infos.to_vec();
+    for info in &mut infos_owned {
+        info.command = truncate_cmd(&info.command, cmd_width);
+    }
+    if use_color {
+        let mut out = io::stdout();
+        write_styled(
+            &mut out,
+            &format!(
+                "\n {} listening port{} \n",
+                infos_owned.len(),
+                if infos_owned.len() == 1 { "" } else { "s" }
+            ),
+            "bold",
+            true,
+        );
+    }
+    display_table(&infos_owned, use_color, colors, false, cmd_width);
+    if use_color && !infos_owned.is_empty() {
+        let mut out = io::stdout();
+        write_styled(&mut out, "  Inspect: portview <port>\n", "dimmed", true);
+        write_styled(
+            &mut out,
+            "  Watch:   portview watch [target] --docker\n",
+            "dimmed",
+            true,
+        );
+    }
 }
 
 fn display_detail(info: &PortInfo, use_color: bool) {
@@ -1311,6 +1344,16 @@ fn main() {
             Command::Doctor { json, no_color } => {
                 let use_color = !no_color && atty_stdout();
                 doctor::run_doctor(use_color, *json);
+                return;
+            }
+            Command::Ssh {
+                destination,
+                remote_args,
+                ssh_opt,
+                no_color,
+            } => {
+                let use_color = !no_color && atty_stdout();
+                ssh::run_ssh(destination, remote_args, ssh_opt, use_color);
                 return;
             }
         }

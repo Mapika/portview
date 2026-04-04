@@ -1,6 +1,145 @@
 use std::net::IpAddr;
+use std::process;
 
 use crate::{PortInfo, TcpState};
+
+// ── SSH command builder ──────────────────────────────────────────────
+
+pub(crate) struct SshCommand {
+    pub destination: String,
+    pub ssh_opts: Vec<String>,
+}
+
+impl SshCommand {
+    pub fn build(&self, remote_args: &[&str]) -> process::Command {
+        let mut cmd = process::Command::new("ssh");
+        cmd.arg("-T");
+        cmd.arg("-o").arg("BatchMode=yes");
+        for opt in &self.ssh_opts {
+            for part in opt.split_whitespace() {
+                cmd.arg(part);
+            }
+        }
+        cmd.arg(&self.destination);
+        cmd.arg("portview");
+        for arg in remote_args {
+            cmd.arg(arg);
+        }
+        cmd
+    }
+
+    pub fn run_oneshot(&self, remote_args: &[&str]) -> Result<String, String> {
+        let output = self
+            .build(remote_args)
+            .output()
+            .map_err(|e| format!("Failed to run ssh: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(classify_ssh_error(&self.destination, &stderr));
+        }
+
+        String::from_utf8(output.stdout).map_err(|e| format!("Invalid UTF-8 from remote: {}", e))
+    }
+}
+
+fn classify_ssh_error(dest: &str, stderr: &str) -> String {
+    let stderr_lower = stderr.to_lowercase();
+    if stderr_lower.contains("command not found") || stderr_lower.contains("no such file") {
+        format!(
+            "portview is not installed on {}. Install with:\n  ssh {} 'curl -fsSL https://raw.githubusercontent.com/mapika/portview/main/install.sh | sh'",
+            dest, dest
+        )
+    } else if stderr_lower.contains("permission denied") {
+        format!(
+            "SSH authentication failed for {}. Check your SSH keys.",
+            dest
+        )
+    } else if stderr_lower.contains("connection refused")
+        || stderr_lower.contains("no route")
+        || stderr_lower.contains("could not resolve")
+    {
+        format!("Failed to connect to {}: {}", dest, stderr.trim())
+    } else {
+        format!("SSH error ({}): {}", dest, stderr.trim())
+    }
+}
+
+// ── Top-level dispatcher ─────────────────────────────────────────────
+
+pub(crate) fn run_ssh(
+    destination: &str,
+    remote_args: &[String],
+    ssh_opts: &[String],
+    use_color: bool,
+) {
+    let ssh = SshCommand {
+        destination: destination.to_string(),
+        ssh_opts: ssh_opts.to_vec(),
+    };
+
+    let first_arg = remote_args.first().map(|s| s.as_str());
+
+    match first_arg {
+        Some("watch") => {
+            let mut args = vec!["watch", "--json"];
+            for arg in &remote_args[1..] {
+                args.push(arg.as_str());
+            }
+            run_ssh_tui(&ssh, &args, use_color);
+        }
+        Some("doctor") => {
+            // Forward doctor output directly (no --json, keep formatting)
+            let args: Vec<&str> = remote_args.iter().map(|s| s.as_str()).collect();
+            run_ssh_passthrough(&ssh, &args);
+        }
+        _ => {
+            let mut args = vec!["--json"];
+            for arg in remote_args {
+                args.push(arg.as_str());
+            }
+            run_ssh_scan(&ssh, &args, use_color);
+        }
+    }
+}
+
+fn run_ssh_passthrough(ssh: &SshCommand, remote_args: &[&str]) {
+    match ssh.run_oneshot(remote_args) {
+        Ok(output) => print!("{}", output),
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_ssh_tui(_ssh: &SshCommand, _remote_args: &[&str], _use_color: bool) {
+    eprintln!("Remote TUI mode coming soon. Use: portview ssh <host>");
+    std::process::exit(1);
+}
+
+fn run_ssh_scan(ssh: &SshCommand, remote_args: &[&str], use_color: bool) {
+    match ssh.run_oneshot(remote_args) {
+        Ok(json_output) => match parse_port_json(&json_output) {
+            Ok(ports) => {
+                if ports.is_empty() {
+                    println!("No ports found on remote host.");
+                } else {
+                    let colors = crate::ColorConfig::from_env();
+                    crate::display_port_table(&ports, use_color, &colors);
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to parse remote output: {}", e);
+                std::process::exit(1);
+            }
+        },
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    }
+}
 
 /// Parse a portview JSON array (as emitted by `--json`) back into `Vec<PortInfo>`.
 ///

@@ -105,4 +105,18 @@ pub enum Command {
         #[arg(long)]
         no_color: bool,
     },
+    /// Inspect ports on a remote host via SSH
+    Ssh {
+        /// SSH destination (user@host or host)
+        destination: String,
+        /// Remote subcommand and arguments (e.g. "watch", "3000", "doctor")
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        remote_args: Vec<String>,
+        /// Extra SSH options (e.g. "-p 2222")
+        #[arg(long)]
+        ssh_opt: Vec<String>,
+        /// Disable all colors
+        #[arg(long)]
+        no_color: bool,
+    },
 }
