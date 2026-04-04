@@ -665,7 +665,14 @@ fn render(frame: &mut ratatui::Frame, app: &mut App) {
 }
 
 fn render_table(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let ports = app.display_ports();
+    let tree_data: Vec<(&PortInfo, u16, bool)> = if app.tree_mode {
+        app.tree_ordered_ports()
+    } else {
+        app.display_ports()
+            .into_iter()
+            .map(|p| (p, 0u16, true))
+            .collect()
+    };
     let wide = app.wide;
 
     let widths = [
@@ -707,7 +714,7 @@ fn render_table(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let header_cells: Vec<Cell> = columns
         .iter()
         .map(|col| {
-            let is_active = *col == app.sort_column;
+            let is_active = !app.tree_mode && *col == app.sort_column;
             let label = if is_active {
                 format!("{}{}", col.label(), app.sort_direction.indicator())
             } else {
@@ -723,9 +730,9 @@ fn render_table(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
         .collect();
     let header = Row::new(header_cells).height(1);
 
-    let rows: Vec<Row> = ports
+    let rows: Vec<Row> = tree_data
         .iter()
-        .map(|info| {
+        .map(|(info, depth, is_last)| {
             let mut command_text = info.command.clone();
             if app.docker_enabled
                 && info.pid != 0
@@ -754,10 +761,24 @@ fn render_table(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
             } else {
                 app.styles.process
             };
-            let process_text = if has_docker {
-                format!("{}*", info.process_name)
+            let tree_prefix = if app.tree_mode && *depth > 0 {
+                let mut prefix = String::new();
+                for _ in 0..(*depth - 1) {
+                    prefix.push_str("\u{2502}   "); // │ + 3 spaces
+                }
+                if *is_last {
+                    prefix.push_str("\u{2514}\u{2500}\u{2500} "); // └──
+                } else {
+                    prefix.push_str("\u{251c}\u{2500}\u{2500} "); // ├──
+                }
+                prefix
             } else {
-                info.process_name.clone()
+                String::new()
+            };
+            let process_text = if has_docker {
+                format!("{}{}*", tree_prefix, info.process_name)
+            } else {
+                format!("{}{}", tree_prefix, info.process_name)
             };
             let pid_str = if is_synthetic {
                 "-".to_string()
