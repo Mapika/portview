@@ -467,7 +467,7 @@ impl StyleConfig {
 
 // ── Crossterm styled write helper ────────────────────────────────────
 
-fn write_styled(w: &mut impl Write, text: &str, color_name: &str, use_color: bool) {
+pub(crate) fn write_styled(w: &mut impl Write, text: &str, color_name: &str, use_color: bool) {
     if !use_color {
         let _ = write!(w, "{}", text);
         return;
@@ -966,7 +966,7 @@ pub(crate) fn do_kill(pid: u32, force: bool) {
     }
 }
 
-fn json_escape(s: &str) -> String {
+pub(crate) fn json_escape(s: &str) -> String {
     let mut escaped = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
