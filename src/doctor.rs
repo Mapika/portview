@@ -434,8 +434,37 @@ fn check_stale_connections(ports: &[PortInfo]) -> Vec<Diagnostic> {
     diagnostics
 }
 
-fn check_resource_hogs(_ports: &[PortInfo]) -> Vec<Diagnostic> {
-    Vec::new()
+fn check_resource_hogs(ports: &[PortInfo]) -> Vec<Diagnostic> {
+    use std::collections::HashSet;
+
+    const MEMORY_THRESHOLD: u64 = 1_000_000_000;
+
+    let mut diagnostics = Vec::new();
+    let mut seen_pids: HashSet<u32> = HashSet::new();
+
+    for p in ports {
+        if p.state != crate::TcpState::Listen {
+            continue;
+        }
+        if seen_pids.contains(&p.pid) {
+            continue;
+        }
+        if p.memory_bytes > MEMORY_THRESHOLD {
+            seen_pids.insert(p.pid);
+            let mem_str = crate::format_bytes(p.memory_bytes);
+            diagnostics.push(Diagnostic {
+                severity: Severity::Warning,
+                check: "resource_hogs",
+                title: format!("{} is using excessive memory", p.process_name),
+                detail: format!(
+                    "{} (PID {}) is listening on port {} and using {} of memory",
+                    p.process_name, p.pid, p.port, mem_str
+                ),
+            });
+        }
+    }
+
+    diagnostics
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -623,6 +652,38 @@ mod tests {
             .map(|i| make_port(3000, i + 1, "app", TcpState::TimeWait, addr))
             .collect();
         let result = check_stale_connections(&ports);
+        assert!(result.is_empty());
+    }
+
+    // ── Task 7: check_resource_hogs ──────────────────────────────────
+
+    #[test]
+    fn resource_hog_over_1gb_flagged() {
+        let addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        let mut p = make_port(8080, 42, "bigapp", TcpState::Listen, addr);
+        // 1.8 * 1024^3 = 1_932_735_283 bytes → format_bytes returns "1.8 GB"
+        p.memory_bytes = 1_932_735_283;
+        let result = check_resource_hogs(&[p]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].severity, Severity::Warning);
+        assert!(result[0].detail.contains("1.8 GB"));
+    }
+
+    #[test]
+    fn resource_normal_not_flagged() {
+        let addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        let p = make_port(8080, 42, "app", TcpState::Listen, addr);
+        // default memory_bytes is 100MB
+        let result = check_resource_hogs(&[p]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn resource_non_listener_not_flagged() {
+        let addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        let mut p = make_port(8080, 42, "app", TcpState::Established, addr);
+        p.memory_bytes = 2_000_000_000;
+        let result = check_resource_hogs(&[p]);
         assert!(result.is_empty());
     }
 
