@@ -337,11 +337,44 @@ fn check_wildcard_exposure(ports: &[PortInfo]) -> Vec<Diagnostic> {
     diagnostics
 }
 
-fn check_docker_host_conflicts(
-    _ports: &[PortInfo],
-    _docker_map: &DockerPortMap,
-) -> Vec<Diagnostic> {
-    Vec::new()
+fn check_docker_host_conflicts(ports: &[PortInfo], docker_map: &DockerPortMap) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+
+    let mut docker_ports: Vec<u16> = docker_map.keys().cloned().collect();
+    docker_ports.sort();
+
+    for docker_port in docker_ports {
+        let containers = &docker_map[&docker_port];
+        // Find host LISTEN processes (pid != 0) on the same port
+        let host_listeners: Vec<&PortInfo> = ports
+            .iter()
+            .filter(|p| p.port == docker_port && p.state == crate::TcpState::Listen && p.pid != 0)
+            .collect();
+
+        if !host_listeners.is_empty() {
+            let container_names: Vec<&str> = containers
+                .iter()
+                .map(|c| c.container_name.as_str())
+                .collect();
+            let host_names: Vec<String> = host_listeners
+                .iter()
+                .map(|p| format!("{} (PID {})", p.process_name, p.pid))
+                .collect();
+            diagnostics.push(Diagnostic {
+                severity: Severity::Error,
+                check: "docker_host_conflict",
+                title: format!("Docker-host conflict on port {}", docker_port),
+                detail: format!(
+                    "Port {} is used by Docker container(s) [{}] and host process(es) [{}]",
+                    docker_port,
+                    container_names.join(", "),
+                    host_names.join(", "),
+                ),
+            });
+        }
+    }
+
+    diagnostics
 }
 
 fn check_stale_connections(_ports: &[PortInfo]) -> Vec<Diagnostic> {
@@ -448,6 +481,59 @@ mod tests {
         let wildcard = IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0));
         let ports = vec![make_port(8080, 200, "myapp", TcpState::Listen, wildcard)];
         let result = check_wildcard_exposure(&ports);
+        assert!(result.is_empty());
+    }
+
+    // ── Task 5: check_docker_host_conflicts ──────────────────────────
+
+    fn make_docker_map(port: u16, container: &str) -> DockerPortMap {
+        use crate::docker::DockerPortOwner;
+        let mut map = DockerPortMap::new();
+        map.insert(
+            port,
+            vec![DockerPortOwner {
+                container_id: "abc123".to_string(),
+                container_name: container.to_string(),
+                image: "test:latest".to_string(),
+                container_port: 80,
+                protocol: "TCP".to_string(),
+            }],
+        );
+        map
+    }
+
+    #[test]
+    fn docker_host_conflict_detected() {
+        let localhost = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        let ports = vec![make_port(8080, 999, "nginx", TcpState::Listen, localhost)];
+        let docker_map = make_docker_map(8080, "my-app");
+        let result = check_docker_host_conflicts(&ports, &docker_map);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn docker_no_conflict_different_port() {
+        let localhost = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        let ports = vec![make_port(3000, 999, "node", TcpState::Listen, localhost)];
+        let docker_map = make_docker_map(8080, "my-app");
+        let result = check_docker_host_conflicts(&ports, &docker_map);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn docker_no_conflict_synthetic_entry() {
+        let localhost = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        // pid=0 is a synthetic Docker entry
+        let ports = vec![make_port(
+            8080,
+            0,
+            "docker-proxy",
+            TcpState::Listen,
+            localhost,
+        )];
+        let docker_map = make_docker_map(8080, "my-app");
+        let result = check_docker_host_conflicts(&ports, &docker_map);
         assert!(result.is_empty());
     }
 
