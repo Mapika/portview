@@ -377,8 +377,61 @@ fn check_docker_host_conflicts(ports: &[PortInfo], docker_map: &DockerPortMap) -
     diagnostics
 }
 
-fn check_stale_connections(_ports: &[PortInfo]) -> Vec<Diagnostic> {
-    Vec::new()
+fn check_stale_connections(ports: &[PortInfo]) -> Vec<Diagnostic> {
+    use std::collections::HashMap;
+
+    let mut time_wait_counts: HashMap<u16, u32> = HashMap::new();
+    let mut close_wait_counts: HashMap<u16, u32> = HashMap::new();
+
+    for p in ports {
+        match p.state {
+            crate::TcpState::TimeWait => {
+                *time_wait_counts.entry(p.port).or_insert(0) += 1;
+            }
+            crate::TcpState::CloseWait => {
+                *close_wait_counts.entry(p.port).or_insert(0) += 1;
+            }
+            _ => {}
+        }
+    }
+
+    let mut diagnostics = Vec::new();
+
+    let mut tw_ports: Vec<u16> = time_wait_counts.keys().cloned().collect();
+    tw_ports.sort();
+    for port in tw_ports {
+        let count = time_wait_counts[&port];
+        if count > 50 {
+            diagnostics.push(Diagnostic {
+                severity: Severity::Warning,
+                check: "stale_connections",
+                title: format!("Stale connections on {}", port),
+                detail: format!(
+                    "Port {} has {} TIME_WAIT connections \u{2014} possible connection leak",
+                    port, count
+                ),
+            });
+        }
+    }
+
+    let mut cw_ports: Vec<u16> = close_wait_counts.keys().cloned().collect();
+    cw_ports.sort();
+    for port in cw_ports {
+        let count = close_wait_counts[&port];
+        if count > 10 {
+            diagnostics.push(Diagnostic {
+                severity: Severity::Warning,
+                check: "stale_connections",
+                title: format!("Stale connections on {}", port),
+                detail: format!(
+                    "Port {} has {} CLOSE_WAIT connections \u{2014} possible connection leak",
+                    port, count
+                ),
+            });
+        }
+    }
+
+    diagnostics
 }
 
 fn check_resource_hogs(_ports: &[PortInfo]) -> Vec<Diagnostic> {
@@ -534,6 +587,42 @@ mod tests {
         )];
         let docker_map = make_docker_map(8080, "my-app");
         let result = check_docker_host_conflicts(&ports, &docker_map);
+        assert!(result.is_empty());
+    }
+
+    // ── Task 6: check_stale_connections ──────────────────────────────
+
+    #[test]
+    fn stale_time_wait_flagged() {
+        let addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        let ports: Vec<PortInfo> = (0..51)
+            .map(|i| make_port(3000, i + 1, "app", TcpState::TimeWait, addr))
+            .collect();
+        let result = check_stale_connections(&ports);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].severity, Severity::Warning);
+        assert!(result[0].detail.contains("TIME_WAIT"));
+    }
+
+    #[test]
+    fn stale_close_wait_flagged() {
+        let addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        let ports: Vec<PortInfo> = (0..11)
+            .map(|i| make_port(5432, i + 1, "app", TcpState::CloseWait, addr))
+            .collect();
+        let result = check_stale_connections(&ports);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].severity, Severity::Warning);
+        assert!(result[0].detail.contains("CLOSE_WAIT"));
+    }
+
+    #[test]
+    fn stale_below_threshold_not_flagged() {
+        let addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        let ports: Vec<PortInfo> = (0..10)
+            .map(|i| make_port(3000, i + 1, "app", TcpState::TimeWait, addr))
+            .collect();
+        let result = check_stale_connections(&ports);
         assert!(result.is_empty());
     }
 
