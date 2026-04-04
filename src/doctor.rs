@@ -60,7 +60,7 @@ fn render_diagnostics(
         diagnostics,
         "port_conflict",
         "No port conflicts",
-        true,
+        results.port_conflicts,
         use_color,
     );
     render_check_category(
@@ -68,7 +68,7 @@ fn render_diagnostics(
         diagnostics,
         "wildcard_exposure",
         "No wildcard exposure issues",
-        true,
+        results.wildcard_exposure,
         use_color,
     );
     render_check_category(
@@ -84,7 +84,7 @@ fn render_diagnostics(
         diagnostics,
         "stale_connections",
         "No stale connections",
-        true,
+        results.stale_connections,
         use_color,
     );
     render_check_category(
@@ -92,7 +92,7 @@ fn render_diagnostics(
         diagnostics,
         "resource_hogs",
         "No high-resource listeners",
-        true,
+        results.resource_hogs,
         use_color,
     );
 
@@ -691,7 +691,14 @@ mod tests {
     fn render_no_issues() {
         let diagnostics: Vec<Diagnostic> = vec![];
         let mut buf = Vec::new();
-        render_diagnostics(&mut buf, &diagnostics, &CheckResults::default(), false);
+        let results = CheckResults {
+            port_conflicts: true,
+            wildcard_exposure: true,
+            docker_host_conflicts: true,
+            stale_connections: true,
+            resource_hogs: true,
+        };
+        render_diagnostics(&mut buf, &diagnostics, &results, false);
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("All clear"));
     }
