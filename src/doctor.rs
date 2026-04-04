@@ -288,8 +288,53 @@ fn check_port_conflicts(ports: &[PortInfo]) -> Vec<Diagnostic> {
     diagnostics
 }
 
-fn check_wildcard_exposure(_ports: &[PortInfo]) -> Vec<Diagnostic> {
-    Vec::new()
+fn check_wildcard_exposure(ports: &[PortInfo]) -> Vec<Diagnostic> {
+    use std::net::IpAddr;
+
+    const SENSITIVE_PROCESSES: &[&str] = &[
+        "postgres",
+        "redis",
+        "redis-server",
+        "mysql",
+        "mysqld",
+        "mariadbd",
+        "mongod",
+        "memcached",
+        "elasticsearch",
+    ];
+
+    let mut diagnostics = Vec::new();
+
+    for p in ports {
+        if p.state != crate::TcpState::Listen {
+            continue;
+        }
+        let is_unspecified = match p.local_addr {
+            IpAddr::V4(a) => a.is_unspecified(),
+            IpAddr::V6(a) => a.is_unspecified(),
+        };
+        if !is_unspecified {
+            continue;
+        }
+        let name_lower = p.process_name.to_lowercase();
+        if SENSITIVE_PROCESSES
+            .iter()
+            .any(|&s| name_lower == s.to_lowercase())
+        {
+            let addr_str = p.local_addr.to_string();
+            diagnostics.push(Diagnostic {
+                severity: Severity::Warning,
+                check: "wildcard_exposure",
+                title: format!("{} exposed on wildcard address", p.process_name),
+                detail: format!(
+                    "{} is listening on {}:{} — consider binding to 127.0.0.1",
+                    p.process_name, addr_str, p.port
+                ),
+            });
+        }
+    }
+
+    diagnostics
 }
 
 fn check_docker_host_conflicts(
@@ -369,6 +414,40 @@ mod tests {
             make_port(3000, 1234, "node", TcpState::Listen, v6),
         ];
         let result = check_port_conflicts(&ports);
+        assert!(result.is_empty());
+    }
+
+    // ── Task 4: check_wildcard_exposure ──────────────────────────────
+
+    #[test]
+    fn wildcard_postgres_flagged() {
+        let wildcard = IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0));
+        let ports = vec![make_port(5432, 100, "postgres", TcpState::Listen, wildcard)];
+        let result = check_wildcard_exposure(&ports);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].severity, Severity::Warning);
+        assert!(result[0].detail.contains("0.0.0.0"));
+    }
+
+    #[test]
+    fn localhost_postgres_not_flagged() {
+        let localhost = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        let ports = vec![make_port(
+            5432,
+            100,
+            "postgres",
+            TcpState::Listen,
+            localhost,
+        )];
+        let result = check_wildcard_exposure(&ports);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn wildcard_unknown_process_not_flagged() {
+        let wildcard = IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0));
+        let ports = vec![make_port(8080, 200, "myapp", TcpState::Listen, wildcard)];
+        let result = check_wildcard_exposure(&ports);
         assert!(result.is_empty());
     }
 
