@@ -354,6 +354,10 @@ fn count_children(pid: i32) -> u32 {
     count as u32
 }
 
+pub fn get_process_cwd(_pid: u32) -> String {
+    String::new()
+}
+
 fn extract_addr(addr_union: &InAddrUnion, vflag: u8) -> IpAddr {
     if vflag & INI_IPV4 != 0 {
         let s_addr = unsafe { addr_union.ina_46.i46a_addr4 };

@@ -391,6 +391,10 @@ fn get_process_username(handle: HANDLE) -> String {
     }
 }
 
+pub fn get_process_cwd(_pid: u32) -> String {
+    String::new()
+}
+
 fn build_process_maps() -> (HashMap<u32, u32>, HashMap<u32, u32>) {
     let mut children_count: HashMap<u32, u32> = HashMap::new();
     let mut ppid_map: HashMap<u32, u32> = HashMap::new();

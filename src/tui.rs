@@ -849,6 +849,23 @@ fn render_detail(frame: &mut ratatui::Frame, app: &App, area: Rect) {
 
     let label_style = app.theme.footer_text;
 
+    let cmd_display = if info.command.len() > 60 {
+        let mut wrapped = String::new();
+        let mut pos = 0;
+        let width = 60;
+        while pos < info.command.len() {
+            let end = (pos + width).min(info.command.len());
+            if pos > 0 {
+                wrapped.push_str("\n            ");
+            }
+            wrapped.push_str(&info.command[pos..end]);
+            pos = end;
+        }
+        wrapped
+    } else {
+        info.command.clone()
+    };
+
     let rows: Vec<(&str, String)> = if is_docker {
         vec![
             ("Bind:", bind_str),
@@ -858,12 +875,11 @@ fn render_detail(frame: &mut ratatui::Frame, app: &App, area: Rect) {
     } else {
         vec![
             ("Bind:", bind_str),
-            ("Command:", info.command.clone()),
+            ("Command:", cmd_display),
             ("User:", info.user.clone()),
             ("Started:", format!("{} ago", uptime)),
             ("Memory:", format_bytes(info.memory_bytes)),
             ("CPU time:", format!("{:.1}s", info.cpu_seconds)),
-            ("Children:", info.children.to_string()),
             ("State:", info.state.to_string()),
         ]
     };
@@ -875,6 +891,110 @@ fn render_detail(frame: &mut ratatui::Frame, app: &App, area: Rect) {
             Span::styled(format!("{:<10}", label), label_style),
             Span::raw(value),
         ]));
+    }
+
+    // Working directory (platform-specific)
+    #[cfg(target_os = "linux")]
+    if !is_docker {
+        let cwd = crate::linux::get_process_cwd(info.pid);
+        if !cwd.is_empty() {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(format!("{:<10}", "Cwd:"), label_style),
+                Span::raw(cwd),
+            ]));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if !is_docker {
+        let cwd = crate::macos::get_process_cwd(info.pid);
+        if !cwd.is_empty() {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(format!("{:<10}", "Cwd:"), label_style),
+                Span::raw(cwd),
+            ]));
+        }
+    }
+
+    // Child processes (port-owning)
+    if !is_docker {
+        let child_ports: Vec<&PortInfo> = app
+            .ports
+            .iter()
+            .filter(|p| {
+                p.ppid == info.pid && p.pid != info.pid && p.state == crate::TcpState::Listen
+            })
+            .collect();
+
+        if !child_ports.is_empty() {
+            lines.push(Line::default());
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(format!("Children ({}):", child_ports.len()), label_style),
+            ]));
+            let show_count = child_ports.len().min(10);
+            for child in &child_ports[..show_count] {
+                lines.push(Line::from(vec![
+                    Span::raw("    PID "),
+                    Span::styled(child.pid.to_string(), app.styles.pid),
+                    Span::raw(format!("  {} on port {}", child.process_name, child.port)),
+                ]));
+            }
+            if child_ports.len() > 10 {
+                lines.push(Line::from(vec![Span::raw(format!(
+                    "    ... and {} more",
+                    child_ports.len() - 10
+                ))]));
+            }
+        } else if info.children > 0 {
+            lines.push(Line::default());
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(format!("{:<10}", "Children:"), label_style),
+                Span::raw(format!("{} (none on ports)", info.children)),
+            ]));
+        }
+    }
+
+    // Open connections on this port
+    if !is_docker {
+        let connections: Vec<&PortInfo> = app
+            .ports
+            .iter()
+            .filter(|p| {
+                p.port == info.port && p.state != crate::TcpState::Listen && p.pid == info.pid
+            })
+            .collect();
+
+        if !connections.is_empty() {
+            lines.push(Line::default());
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(format!("Connections ({}):", connections.len()), label_style),
+            ]));
+            let show_count = connections.len().min(10);
+            for conn in &connections[..show_count] {
+                let state_style = match conn.state {
+                    crate::TcpState::Established => app.theme.status_ok,
+                    crate::TcpState::TimeWait | crate::TcpState::CloseWait => {
+                        Style::default().fg(Color::Yellow)
+                    }
+                    _ => app.theme.footer_text,
+                };
+                lines.push(Line::from(vec![
+                    Span::raw("    "),
+                    Span::styled(format!("{:<14}", conn.state.to_string()), state_style),
+                    Span::raw(format!("{}:{}", conn.local_addr, conn.port)),
+                ]));
+            }
+            if connections.len() > 10 {
+                lines.push(Line::from(vec![Span::raw(format!(
+                    "    ... and {} more",
+                    connections.len() - 10
+                ))]));
+            }
+        }
     }
 
     if app.docker_enabled {

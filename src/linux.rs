@@ -264,6 +264,12 @@ fn count_children(pid: u32) -> u32 {
     children.split_whitespace().count() as u32
 }
 
+pub fn get_process_cwd(pid: u32) -> String {
+    std::fs::read_link(format!("/proc/{}/cwd", pid))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 // ── Assemble port info ───────────────────────────────────────────────
 
 pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
