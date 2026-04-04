@@ -97,7 +97,7 @@ jobs:
       - name: Package completions and man page
         if: matrix.name == 'linux-x86_64'
         run: |
-          OUT_DIR=$(find target/${{ matrix.target }}/build -path '*/portview-*/out' -type d | head -1)
+          OUT_DIR=$(find target -path '*/portview-*/out' -type d | head -1)
           mkdir -p dist-extras
           cp -r "$OUT_DIR/completions" dist-extras/
           cp -r "$OUT_DIR/man" dist-extras/
