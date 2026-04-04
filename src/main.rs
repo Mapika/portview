@@ -142,6 +142,23 @@ impl TcpState {
             TcpState::Unknown => "UNKNOWN",
         }
     }
+
+    pub(crate) fn from_state_str(s: &str) -> Self {
+        match s {
+            "LISTEN" => TcpState::Listen,
+            "ESTABLISHED" => TcpState::Established,
+            "TIME_WAIT" => TcpState::TimeWait,
+            "CLOSE_WAIT" => TcpState::CloseWait,
+            "FIN_WAIT1" => TcpState::FinWait1,
+            "FIN_WAIT2" => TcpState::FinWait2,
+            "SYN_SENT" => TcpState::SynSent,
+            "SYN_RECV" => TcpState::SynRecv,
+            "CLOSING" => TcpState::Closing,
+            "LAST_ACK" => TcpState::LastAck,
+            "CLOSE" => TcpState::Close,
+            _ => TcpState::Unknown,
+        }
+    }
 }
 
 impl std::fmt::Display for TcpState {
@@ -1021,7 +1038,7 @@ fn docker_owner_json(owner: &DockerPortOwner) -> String {
 
 fn port_info_json(info: &PortInfo, docker_owners: Option<&[DockerPortOwner]>) -> String {
     let mut json = format!(
-        r#"{{"port":{},"protocol":"{}","pid":{},"ppid":{},"process":"{}","command":"{}","user":"{}","state":"{}","memory_bytes":{},"cpu_seconds":{:.1},"children":{}"#,
+        r#"{{"port":{},"protocol":"{}","pid":{},"ppid":{},"process":"{}","command":"{}","user":"{}","state":"{}","memory_bytes":{},"cpu_seconds":{:.1},"children":{},"local_addr":"{}""#,
         info.port,
         json_escape(&info.protocol),
         info.pid,
@@ -1033,6 +1050,7 @@ fn port_info_json(info: &PortInfo, docker_owners: Option<&[DockerPortOwner]>) ->
         info.memory_bytes,
         info.cpu_seconds,
         info.children,
+        info.local_addr,
     );
 
     if let Some(owners) = docker_owners {
@@ -1653,6 +1671,24 @@ mod tests {
     #[test]
     fn json_escape_unicode_passthrough() {
         assert_eq!(json_escape("café ☕"), "café ☕");
+    }
+
+    // ── TcpState::from_state_str ────────────────────────────────────
+
+    #[test]
+    fn tcp_state_from_str_known() {
+        assert_eq!(TcpState::from_state_str("LISTEN"), TcpState::Listen);
+        assert_eq!(
+            TcpState::from_state_str("ESTABLISHED"),
+            TcpState::Established
+        );
+        assert_eq!(TcpState::from_state_str("TIME_WAIT"), TcpState::TimeWait);
+    }
+
+    #[test]
+    fn tcp_state_from_str_unknown() {
+        assert_eq!(TcpState::from_state_str("BOGUS"), TcpState::Unknown);
+        assert_eq!(TcpState::from_state_str(""), TcpState::Unknown);
     }
 
     // ── is_valid_color ──────────────────────────────────────────────
