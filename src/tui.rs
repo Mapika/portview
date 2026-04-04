@@ -247,6 +247,7 @@ pub struct App {
     status_message: Option<(String, Instant)>,
     sort_column: SortColumn,
     sort_direction: SortDirection,
+    tree_mode: bool,
 }
 
 impl App {
@@ -286,9 +287,10 @@ impl App {
             status_message: None,
             sort_column,
             sort_direction: SortDirection::Asc,
+            tree_mode: false,
         };
         app.refresh_data();
-        if !app.sorted_ports().is_empty() {
+        if !app.display_ports().is_empty() {
             app.table_state.select(Some(0));
         }
         app
@@ -308,7 +310,7 @@ impl App {
         self.last_refresh = Instant::now();
 
         // Clamp selection
-        let count = self.sorted_ports().len();
+        let count = self.display_ports().len();
         if count == 0 {
             self.table_state.select(None);
         } else if let Some(sel) = self.table_state.selected() {
@@ -415,15 +417,76 @@ impl App {
         result
     }
 
+    fn tree_ordered_ports(&self) -> Vec<(&PortInfo, u16, bool)> {
+        let filtered = self.filtered_ports();
+        let pid_set: std::collections::HashSet<u32> = filtered.iter().map(|p| p.pid).collect();
+        let mut children_of: std::collections::HashMap<u32, Vec<&PortInfo>> =
+            std::collections::HashMap::new();
+        let mut roots: Vec<&PortInfo> = Vec::new();
+
+        for p in &filtered {
+            if p.ppid != 0 && pid_set.contains(&p.ppid) && p.ppid != p.pid {
+                children_of.entry(p.ppid).or_default().push(p);
+            } else {
+                roots.push(p);
+            }
+        }
+
+        roots.sort_by_key(|p| p.port);
+        for children in children_of.values_mut() {
+            children.sort_by_key(|p| p.port);
+        }
+
+        let mut result: Vec<(&PortInfo, u16, bool)> = Vec::new();
+        fn walk<'a>(
+            pid: u32,
+            info: &'a PortInfo,
+            depth: u16,
+            is_last: bool,
+            children_of: &std::collections::HashMap<u32, Vec<&'a PortInfo>>,
+            result: &mut Vec<(&'a PortInfo, u16, bool)>,
+        ) {
+            result.push((info, depth, is_last));
+            if let Some(children) = children_of.get(&pid) {
+                let len = children.len();
+                for (i, child) in children.iter().enumerate() {
+                    walk(
+                        child.pid,
+                        child,
+                        depth + 1,
+                        i == len - 1,
+                        children_of,
+                        result,
+                    );
+                }
+            }
+        }
+        for root in &roots {
+            walk(root.pid, root, 0, true, &children_of, &mut result);
+        }
+        result
+    }
+
+    fn display_ports(&self) -> Vec<&PortInfo> {
+        if self.tree_mode {
+            self.tree_ordered_ports()
+                .into_iter()
+                .map(|(p, _, _)| p)
+                .collect()
+        } else {
+            self.sorted_ports()
+        }
+    }
+
     fn selected_port(&self) -> Option<&PortInfo> {
-        let ports = self.sorted_ports();
+        let ports = self.display_ports();
         self.table_state
             .selected()
             .and_then(|i| ports.get(i).copied())
     }
 
     fn select_next(&mut self) {
-        let count = self.sorted_ports().len();
+        let count = self.display_ports().len();
         if count == 0 {
             return;
         }
@@ -432,7 +495,7 @@ impl App {
     }
 
     fn select_prev(&mut self) {
-        let count = self.sorted_ports().len();
+        let count = self.display_ports().len();
         if count == 0 {
             return;
         }
@@ -441,13 +504,13 @@ impl App {
     }
 
     fn select_first(&mut self) {
-        if !self.sorted_ports().is_empty() {
+        if !self.display_ports().is_empty() {
             self.table_state.select(Some(0));
         }
     }
 
     fn select_last(&mut self) {
-        let count = self.sorted_ports().len();
+        let count = self.display_ports().len();
         if count > 0 {
             self.table_state.select(Some(count - 1));
         }
@@ -457,7 +520,7 @@ impl App {
 // ── Rendering ────────────────────────────────────────────────────────
 
 fn build_title_line(app: &App) -> Line<'_> {
-    let visible_ports = app.sorted_ports();
+    let visible_ports = app.display_ports();
     let port_count = visible_ports.len();
     let mut spans = vec![
         Span::styled(" portview", app.theme.title),
@@ -543,13 +606,20 @@ fn build_footer_line(app: &App) -> Line<'_> {
             Span::styled(" action  ", app.theme.footer_text),
             Span::styled("/", app.theme.footer_key),
             Span::styled(" filter  ", app.theme.footer_text),
-            Span::styled("\u{2190}/\u{2192}/r", app.theme.footer_key),
-            Span::styled(" sort  ", app.theme.footer_text),
-            Span::styled("a", app.theme.footer_key),
-            Span::styled(all_label, app.theme.footer_text),
-            Span::styled("q", app.theme.footer_key),
-            Span::styled(" quit  ", app.theme.footer_text),
         ];
+        if app.tree_mode {
+            spans.push(Span::styled("t", app.theme.footer_key));
+            spans.push(Span::styled(" flat  ", app.theme.footer_text));
+        } else {
+            spans.push(Span::styled("\u{2190}/\u{2192}/r", app.theme.footer_key));
+            spans.push(Span::styled(" sort  ", app.theme.footer_text));
+            spans.push(Span::styled("t", app.theme.footer_key));
+            spans.push(Span::styled(" tree  ", app.theme.footer_text));
+        }
+        spans.push(Span::styled("a", app.theme.footer_key));
+        spans.push(Span::styled(all_label, app.theme.footer_text));
+        spans.push(Span::styled("q", app.theme.footer_key));
+        spans.push(Span::styled(" quit  ", app.theme.footer_text));
         if app.docker_enabled {
             spans.push(Span::styled("docker", app.theme.footer_key));
             spans.push(Span::styled(" filterable  ", app.theme.footer_text));
@@ -595,7 +665,7 @@ fn render(frame: &mut ratatui::Frame, app: &mut App) {
 }
 
 fn render_table(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let ports = app.sorted_ports();
+    let ports = app.display_ports();
     let wide = app.wide;
 
     let widths = [
@@ -723,7 +793,7 @@ fn render_table(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
 }
 
 fn render_detail(frame: &mut ratatui::Frame, app: &App, area: Rect) {
-    let ports = app.sorted_ports();
+    let ports = app.display_ports();
     let info = match ports.get(app.detail_index) {
         Some(i) => i,
         None => {
@@ -1051,16 +1121,16 @@ fn handle_table_key(app: &mut App, code: KeyCode) {
             app.show_all = !app.show_all;
             app.refresh_data();
         }
-        KeyCode::Char('<') | KeyCode::Left => {
+        KeyCode::Char('<') | KeyCode::Left if !app.tree_mode => {
             app.sort_column = app.sort_column.prev();
         }
-        KeyCode::Char('>') | KeyCode::Right => {
+        KeyCode::Char('>') | KeyCode::Right if !app.tree_mode => {
             app.sort_column = app.sort_column.next();
         }
-        KeyCode::Char('r') => {
+        KeyCode::Char('r') if !app.tree_mode => {
             app.sort_direction = app.sort_direction.toggle();
         }
-        KeyCode::Char(c @ '1'..='9') => {
+        KeyCode::Char(c @ '1'..='9') if !app.tree_mode => {
             let idx = (c as usize) - ('1' as usize);
             if let Some(col) = SortColumn::from_index(idx) {
                 if app.sort_column == col {
@@ -1071,6 +1141,9 @@ fn handle_table_key(app: &mut App, code: KeyCode) {
                 }
             }
         }
+        KeyCode::Char('t') => {
+            app.tree_mode = !app.tree_mode;
+        }
         _ => {}
     }
 }
@@ -1080,7 +1153,7 @@ fn handle_detail_key(app: &mut App, code: KeyCode) {
         KeyCode::Esc => app.mode = AppMode::Table,
         KeyCode::Char('q') => app.should_quit = true,
         KeyCode::Char('d') => {
-            let ports = app.sorted_ports();
+            let ports = app.display_ports();
             if let Some(info) = ports.get(app.detail_index) {
                 if info.pid == 0 {
                     app.popup = Some(Popup::Docker(DockerPopup {
@@ -1099,7 +1172,7 @@ fn handle_detail_key(app: &mut App, code: KeyCode) {
             }
         }
         KeyCode::Char('D') => {
-            let ports = app.sorted_ports();
+            let ports = app.display_ports();
             if let Some(info) = ports.get(app.detail_index) {
                 if info.pid == 0 {
                     app.popup = Some(Popup::Docker(DockerPopup {
@@ -1126,7 +1199,7 @@ fn handle_filter_key(app: &mut App, code: KeyCode) {
         KeyCode::Enter => {
             app.mode = AppMode::Table;
             // Clamp selection after filter applied
-            let count = app.sorted_ports().len();
+            let count = app.display_ports().len();
             if count == 0 {
                 app.table_state.select(None);
             } else {
@@ -1137,7 +1210,7 @@ fn handle_filter_key(app: &mut App, code: KeyCode) {
             app.filter_text.clear();
             app.mode = AppMode::Table;
             // Reselect after clearing filter
-            let count = app.sorted_ports().len();
+            let count = app.display_ports().len();
             if count > 0 && app.table_state.selected().is_none() {
                 app.table_state.select(Some(0));
             }
@@ -1329,6 +1402,7 @@ mod tests {
             status_message: None,
             sort_column: SortColumn::Port,
             sort_direction: SortDirection::Asc,
+            tree_mode: false,
         }
     }
 
