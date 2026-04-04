@@ -185,9 +185,10 @@ fn get_process_cmdline(pid: u32) -> String {
     }
 }
 
-fn parse_proc_status(pid: u32) -> (u32, u64) {
+fn parse_proc_status(pid: u32) -> (u32, u32, u64) {
     let status = fs::read_to_string(format!("/proc/{}/status", pid)).unwrap_or_default();
     let mut uid = 0u32;
+    let mut ppid = 0u32;
     let mut rss_bytes = 0u64;
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("Uid:") {
@@ -197,6 +198,8 @@ fn parse_proc_status(pid: u32) -> (u32, u64) {
                 .unwrap_or("0")
                 .parse()
                 .unwrap_or(0);
+        } else if let Some(rest) = line.strip_prefix("PPid:") {
+            ppid = rest.trim().parse().unwrap_or(0);
         } else if let Some(rest) = line.strip_prefix("VmRSS:") {
             let kb: u64 = rest
                 .split_whitespace()
@@ -207,7 +210,7 @@ fn parse_proc_status(pid: u32) -> (u32, u64) {
             rss_bytes = kb * 1024;
         }
     }
-    (uid, rss_bytes)
+    (uid, ppid, rss_bytes)
 }
 
 fn get_boot_time() -> u64 {
@@ -288,7 +291,7 @@ pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
             None => continue,
         };
 
-        let (uid, rss_bytes) = parse_proc_status(pid);
+        let (uid, ppid, rss_bytes) = parse_proc_status(pid);
         let (start_time, cpu_seconds) = parse_proc_stat(pid, boot_time, clock_ticks);
 
         infos.push(PortInfo {
@@ -299,6 +302,7 @@ pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
                 .unwrap_or(&sock.protocol)
                 .to_string(),
             pid,
+            ppid,
             process_name: get_process_name(pid),
             command: get_process_cmdline(pid),
             user: get_username(uid),

@@ -498,6 +498,7 @@ pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
         });
 
         let children = count_children(pid);
+        let ppid = task_info.as_ref().map(|t| t.pbsd.pbi_ppid).unwrap_or(0);
         let user = get_username(uid);
 
         for hit in hits {
@@ -505,6 +506,7 @@ pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
                 port: hit.local_port,
                 protocol: hit.protocol,
                 pid: pid as u32,
+                ppid,
                 process_name: process_name.clone(),
                 command: command.clone(),
                 user: user.clone(),

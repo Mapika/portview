@@ -481,6 +481,7 @@ mod tests {
             port,
             protocol: "TCP".to_string(),
             pid,
+            ppid: 0,
             process_name: name.to_string(),
             command: name.to_string(),
             user: "test".to_string(),

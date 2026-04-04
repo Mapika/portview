@@ -391,12 +391,13 @@ fn get_process_username(handle: HANDLE) -> String {
     }
 }
 
-fn build_child_count_map() -> HashMap<u32, u32> {
+fn build_process_maps() -> (HashMap<u32, u32>, HashMap<u32, u32>) {
     let mut children_count: HashMap<u32, u32> = HashMap::new();
+    let mut ppid_map: HashMap<u32, u32> = HashMap::new();
 
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
-        return children_count;
+        return (children_count, ppid_map);
     }
 
     let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
@@ -404,6 +405,7 @@ fn build_child_count_map() -> HashMap<u32, u32> {
 
     if unsafe { Process32FirstW(snapshot, &mut entry) } != 0 {
         loop {
+            ppid_map.insert(entry.th32ProcessID, entry.th32ParentProcessID);
             if entry.th32ParentProcessID != 0 {
                 *children_count.entry(entry.th32ParentProcessID).or_insert(0) += 1;
             }
@@ -414,14 +416,14 @@ fn build_child_count_map() -> HashMap<u32, u32> {
     }
 
     unsafe { CloseHandle(snapshot) };
-    children_count
+    (children_count, ppid_map)
 }
 
 // ── Main entry point ─────────────────────────────────────────────────
 
 pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
     let sockets = get_all_sockets();
-    let child_map = build_child_count_map();
+    let (child_map, ppid_map) = build_process_maps();
 
     // Group sockets by PID to avoid opening the same process multiple times
     let mut pid_sockets: HashMap<u32, Vec<&RawSocket>> = HashMap::new();
@@ -456,6 +458,7 @@ pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
                         port: sock.local_port,
                         protocol: sock.protocol.clone(),
                         pid,
+                        ppid: ppid_map.get(&pid).copied().unwrap_or(0),
                         process_name: String::new(),
                         command: String::new(),
                         user: String::new(),
@@ -481,6 +484,7 @@ pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
                     port: sock.local_port,
                     protocol: sock.protocol.clone(),
                     pid,
+                    ppid: ppid_map.get(&pid).copied().unwrap_or(0),
                     process_name: name.clone(),
                     command: if path.is_empty() {
                         format!("[{}]", name)
@@ -518,6 +522,7 @@ pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
                 port: sock.local_port,
                 protocol: sock.protocol.clone(),
                 pid,
+                ppid: ppid_map.get(&pid).copied().unwrap_or(0),
                 process_name: name.clone(),
                 command: command.clone(),
                 user: user.clone(),

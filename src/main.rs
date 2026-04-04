@@ -40,6 +40,7 @@ pub(crate) struct PortInfo {
     pub(crate) port: u16,
     pub(crate) protocol: String,
     pub(crate) pid: u32,
+    pub(crate) ppid: u32,
     pub(crate) process_name: String,
     pub(crate) command: String,
     pub(crate) user: String,
@@ -835,6 +836,7 @@ pub(crate) fn synthesize_docker_entries(
                 port: host_port,
                 protocol: owner.protocol.clone(),
                 pid: 0,
+                ppid: 0,
                 process_name: owner.container_name.clone(),
                 command,
                 user: "docker".to_string(),
@@ -1004,10 +1006,11 @@ fn docker_owner_json(owner: &DockerPortOwner) -> String {
 
 fn port_info_json(info: &PortInfo, docker_owners: Option<&[DockerPortOwner]>) -> String {
     let mut json = format!(
-        r#"{{"port":{},"protocol":"{}","pid":{},"process":"{}","command":"{}","user":"{}","state":"{}","memory_bytes":{},"cpu_seconds":{:.1},"children":{}"#,
+        r#"{{"port":{},"protocol":"{}","pid":{},"ppid":{},"process":"{}","command":"{}","user":"{}","state":"{}","memory_bytes":{},"cpu_seconds":{:.1},"children":{}"#,
         info.port,
         json_escape(&info.protocol),
         info.pid,
+        info.ppid,
         json_escape(&info.process_name),
         json_escape(&info.command),
         json_escape(&info.user),
