@@ -233,10 +233,59 @@ pub fn run_doctor(use_color: bool, json: bool) {
     }
 }
 
-// ── Check stubs (implemented in subsequent tasks) ───────────────────
+// ── Check implementations ────────────────────────────────────────────
 
-fn check_port_conflicts(_ports: &[PortInfo]) -> Vec<Diagnostic> {
-    Vec::new()
+fn check_port_conflicts(ports: &[PortInfo]) -> Vec<Diagnostic> {
+    use std::collections::HashMap;
+
+    // Group LISTEN entries by (port, protocol)
+    let mut groups: HashMap<(u16, &str), Vec<&PortInfo>> = HashMap::new();
+    for p in ports {
+        if p.state == crate::TcpState::Listen {
+            groups
+                .entry((p.port, p.protocol.as_str()))
+                .or_default()
+                .push(p);
+        }
+    }
+
+    let mut diagnostics = Vec::new();
+    let mut keys: Vec<_> = groups.keys().cloned().collect();
+    keys.sort();
+
+    for (port, protocol) in keys {
+        let entries = &groups[&(port, protocol)];
+        // Deduplicate by PID
+        let mut pids: Vec<u32> = entries.iter().map(|p| p.pid).collect();
+        pids.sort();
+        pids.dedup();
+
+        if pids.len() > 1 {
+            let process_list: Vec<String> = pids
+                .iter()
+                .filter_map(|&pid| {
+                    entries
+                        .iter()
+                        .find(|p| p.pid == pid)
+                        .map(|p| format!("{} (PID {})", p.process_name, pid))
+                })
+                .collect();
+            let detail = format!(
+                "Port {}/{} has conflicting listeners: {}",
+                port,
+                protocol,
+                process_list.join(", ")
+            );
+            diagnostics.push(Diagnostic {
+                severity: Severity::Error,
+                check: "port_conflict",
+                title: format!("Port conflict on {}", port),
+                detail,
+            });
+        }
+    }
+
+    diagnostics
 }
 
 fn check_wildcard_exposure(_ports: &[PortInfo]) -> Vec<Diagnostic> {
@@ -263,6 +312,65 @@ fn check_resource_hogs(_ports: &[PortInfo]) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TcpState;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::time::SystemTime;
+
+    fn make_port(port: u16, pid: u32, name: &str, state: TcpState, addr: IpAddr) -> PortInfo {
+        PortInfo {
+            port,
+            protocol: "TCP".to_string(),
+            pid,
+            process_name: name.to_string(),
+            command: name.to_string(),
+            user: "test".to_string(),
+            state,
+            memory_bytes: 100 * 1024 * 1024,
+            cpu_seconds: 1.0,
+            start_time: Some(SystemTime::now()),
+            children: 0,
+            local_addr: addr,
+        }
+    }
+
+    // ── Task 3: check_port_conflicts ─────────────────────────────────
+
+    #[test]
+    fn conflict_two_pids_same_port() {
+        let localhost = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        let ports = vec![
+            make_port(3000, 1234, "node", TcpState::Listen, localhost),
+            make_port(3000, 5678, "python3", TcpState::Listen, localhost),
+        ];
+        let result = check_port_conflicts(&ports);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].severity, Severity::Error);
+        assert!(result[0].detail.contains("node"));
+        assert!(result[0].detail.contains("python3"));
+    }
+
+    #[test]
+    fn no_conflict_different_ports() {
+        let localhost = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+        let ports = vec![
+            make_port(3000, 1234, "node", TcpState::Listen, localhost),
+            make_port(4000, 5678, "python3", TcpState::Listen, localhost),
+        ];
+        let result = check_port_conflicts(&ports);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn no_conflict_same_pid() {
+        let v4 = IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0));
+        let v6 = IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED);
+        let ports = vec![
+            make_port(3000, 1234, "node", TcpState::Listen, v4),
+            make_port(3000, 1234, "node", TcpState::Listen, v6),
+        ];
+        let result = check_port_conflicts(&ports);
+        assert!(result.is_empty());
+    }
 
     #[test]
     fn render_no_issues() {
