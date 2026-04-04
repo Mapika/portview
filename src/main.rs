@@ -24,6 +24,7 @@ use windows::get_port_infos;
 mod cli;
 mod docker;
 mod doctor;
+mod ssh;
 mod tui;
 use cli::{Cli, Command};
 use docker::{DockerPortMap, DockerPortOwner, get_docker_port_map};
