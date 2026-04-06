@@ -18,7 +18,7 @@ crossterm = "0.29"
 [build-dependencies]
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
-clap_mangen = "0.2"
+clap_mangen = "0.3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
