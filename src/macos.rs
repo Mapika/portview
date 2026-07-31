@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -383,6 +384,58 @@ fn cstr_from_bytes(bytes: &[u8]) -> String {
 }
 
 // ── Main entry point ─────────────────────────────────────────────────
+
+/// Count TIME_WAIT / CLOSE_WAIT sockets per local port.
+///
+/// `get_port_infos` cannot be used for this: it deduplicates by
+/// (port, protocol, pid), so many leaked connections on one port collapse into a
+/// single row and no threshold can ever trip.
+///
+/// Platform limitation: this walks each process's file descriptors, so it only
+/// sees sockets a live process still holds. That covers CLOSE_WAIT, which is
+/// precisely a socket the local process has failed to close. It does *not* cover
+/// TIME_WAIT, which by definition outlives the process that owned it — those are
+/// invisible to `proc_pidfdinfo` and would need the `net.inet.tcp.pcblist`
+/// sysctl to enumerate.
+pub fn get_stale_connection_counts() -> HashMap<(u16, TcpState), u32> {
+    let mut counts: HashMap<(u16, TcpState), u32> = HashMap::new();
+
+    for &pid in &list_all_pids() {
+        for fd_info in &list_fds(pid) {
+            if fd_info.proc_fdtype != PROX_FDTYPE_SOCKET {
+                continue;
+            }
+            let sock_info = match get_socket_info(pid, fd_info.proc_fd) {
+                Some(s) => s,
+                None => continue, // EPERM or other error — silently skip
+            };
+
+            let si = &sock_info.psi;
+            if si.soi_kind != SOCKINFO_TCP {
+                continue;
+            }
+            if si.soi_family != libc::AF_INET as i32 && si.soi_family != libc::AF_INET6 as i32 {
+                continue;
+            }
+
+            let tcp: TcpSockInfo =
+                unsafe { std::ptr::read_unaligned(si.soi_proto.as_ptr() as *const TcpSockInfo) };
+            let state = TcpState::from_tsi(tcp.tcpsi_state);
+            if !matches!(state, TcpState::TimeWait | TcpState::CloseWait) {
+                continue;
+            }
+
+            let port = u16::from_be(tcp.tcpsi_ini.insi_lport as u16);
+            if port == 0 {
+                continue;
+            }
+
+            *counts.entry((port, state)).or_insert(0) += 1;
+        }
+    }
+
+    counts
+}
 
 pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
     let pids = list_all_pids();

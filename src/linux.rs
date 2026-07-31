@@ -95,10 +95,11 @@ fn parse_proc_net(path: &str, protocol: &str, ipv6: bool) -> Vec<SocketEntry> {
             };
             let inode = fields[9].parse::<u64>().unwrap_or(0);
 
-            if inode == 0 {
-                return None;
-            }
-
+            // inode 0 means no process holds this socket. TIME_WAIT sockets are
+            // exactly that — they outlive the process that opened them — so they
+            // are kept here rather than dropped, otherwise doctor's TIME_WAIT
+            // check can never see them. `get_port_infos` still skips them: no
+            // pid maps to inode 0, so its inode lookup misses and it moves on.
             Some(SocketEntry {
                 protocol: protocol.to_string(),
                 local_addr,
@@ -119,6 +120,24 @@ fn get_all_sockets() -> Vec<SocketEntry> {
     sockets.extend(parse_proc_net("/proc/net/udp", "UDP", false));
     sockets.extend(parse_proc_net("/proc/net/udp6", "UDP6", true));
     sockets
+}
+
+/// Count TIME_WAIT / CLOSE_WAIT sockets per local port.
+///
+/// Read straight from the raw socket table, because `get_port_infos` destroys
+/// this information twice over: it drops sockets with no owning process (which
+/// is every TIME_WAIT socket — they outlive the process that opened them), and
+/// it deduplicates by (port, protocol, pid), collapsing a hundred leaked
+/// connections on one port into a single row. Counting the deduplicated list
+/// therefore never exceeds 1 per port and no threshold can ever trip.
+pub fn get_stale_connection_counts() -> HashMap<(u16, TcpState), u32> {
+    let mut counts = HashMap::new();
+    for sock in get_all_sockets() {
+        if matches!(sock.state, TcpState::TimeWait | TcpState::CloseWait) {
+            *counts.entry((sock.local_port, sock.state)).or_insert(0) += 1;
+        }
+    }
+    counts
 }
 
 fn build_inode_to_pid_map() -> HashMap<u64, u32> {
@@ -162,11 +181,43 @@ fn build_inode_to_pid_map() -> HashMap<u64, u32> {
 
 // ── Process info ─────────────────────────────────────────────────────
 
+/// Name of the executable behind `pid`.
+///
+/// Prefers `/proc/<pid>/exe` over `/proc/<pid>/comm`. `comm` is the *thread*
+/// name, which runtimes overwrite: Node.js reports `MainThread`, so `ps`, `ss`
+/// and `lsof` all show a Node dev server as "MainThread" rather than "node".
+/// `comm` is also truncated to 15 bytes (TASK_COMM_LEN), so long names arrive
+/// clipped. Reading the executable link matches what macOS (`proc_pidpath`) and
+/// Windows (`QueryFullProcessImageNameW`) already do, keeping the PROCESS
+/// column consistent across platforms.
+///
+/// Falls back to `comm` when `exe` is unreadable — kernel threads have no `exe`,
+/// and another user's process needs matching credentials to follow the link.
 fn get_process_name(pid: u32) -> String {
+    if let Ok(path) = fs::read_link(format!("/proc/{}/exe", pid))
+        && let Some(name) = exe_link_name(&path)
+    {
+        return name;
+    }
+
     fs::read_to_string(format!("/proc/{}/comm", pid))
         .unwrap_or_default()
         .trim()
         .to_string()
+}
+
+/// Basename of an `/proc/<pid>/exe` target, with the kernel's " (deleted)"
+/// suffix stripped — that marker appears when the binary was replaced or
+/// removed while running, which is routine after a package upgrade.
+fn exe_link_name(path: &std::path::Path) -> Option<String> {
+    let raw = path.to_string_lossy();
+    let trimmed = raw.strip_suffix(" (deleted)").unwrap_or(&raw);
+    let name = trimmed.rsplit('/').next()?.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 fn get_process_cmdline(pid: u32) -> String {
@@ -437,5 +488,80 @@ mod tests {
     fn parse_addr_port_bad_port() {
         let (_, port) = parse_addr_port("0100007F:ZZZZ", false);
         assert_eq!(port, 0);
+    }
+
+    #[test]
+    fn parse_proc_net_keeps_orphaned_sockets() {
+        // Regression guard. TIME_WAIT sockets carry inode 0 because no process
+        // holds them any more. Filtering those out here made doctor's TIME_WAIT
+        // check permanently unreachable — the sockets never reached the counter.
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("portview-proc-net-test-{}", std::process::id()));
+        let fixture = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 12345 1
+   1: 0100007F:1C20 0100007F:B3A2 06 00000000:00000000 00:00000000 00000000     0        0 0 0
+";
+        fs::write(&path, fixture).unwrap();
+        let entries = parse_proc_net(path.to_str().unwrap(), "TCP", false);
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(
+            entries.len(),
+            2,
+            "orphaned socket was dropped: {:?}",
+            entries
+        );
+
+        let listener = entries
+            .iter()
+            .find(|e| e.state == TcpState::Listen)
+            .unwrap();
+        assert_eq!(listener.local_port, 8080);
+        assert_eq!(listener.inode, 12345);
+
+        let orphan = entries
+            .iter()
+            .find(|e| e.state == TcpState::TimeWait)
+            .expect("TIME_WAIT entry missing");
+        assert_eq!(orphan.local_port, 7200);
+        assert_eq!(orphan.inode, 0);
+    }
+
+    #[test]
+    fn exe_link_name_takes_basename() {
+        assert_eq!(
+            exe_link_name(std::path::Path::new("/usr/bin/node")).as_deref(),
+            Some("node")
+        );
+        assert_eq!(
+            exe_link_name(std::path::Path::new("/usr/lib/postgresql/16/bin/postgres")).as_deref(),
+            Some("postgres")
+        );
+    }
+
+    #[test]
+    fn exe_link_name_strips_deleted_marker() {
+        // The kernel appends this when the binary was replaced while running.
+        assert_eq!(
+            exe_link_name(std::path::Path::new("/usr/bin/node (deleted)")).as_deref(),
+            Some("node")
+        );
+    }
+
+    #[test]
+    fn exe_link_name_rejects_unusable_targets() {
+        assert_eq!(exe_link_name(std::path::Path::new("")), None);
+        assert_eq!(exe_link_name(std::path::Path::new("/")), None);
+    }
+
+    #[test]
+    fn process_name_resolves_real_executable() {
+        // Our own process: /proc/self/exe is always readable, and the answer
+        // must be the binary name, never the thread name.
+        let me = std::process::id();
+        let name = get_process_name(me);
+        assert!(!name.is_empty());
+        assert!(!name.contains('/'), "expected a basename, got {}", name);
     }
 }
