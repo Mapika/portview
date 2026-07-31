@@ -973,7 +973,7 @@ checksum = "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49"
 
 [[package]]
 name = "portview"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "clap",
  "clap_complete",

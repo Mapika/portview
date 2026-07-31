@@ -112,7 +112,7 @@ portview mcp --read-only
 ```
 
 Listed in the [MCP Registry](https://registry.modelcontextprotocol.io) as
-`mcp-name: io.github.mapika/portview`.
+`mcp-name: io.github.Mapika/portview`.
 
 ### Watch mode (interactive TUI)
 
