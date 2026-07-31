@@ -183,12 +183,30 @@ jobs:
             exit 1
           fi
 
-      - name: Tag must match Cargo.toml
+      - name: Tag must match every version we declare
         id: check
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME#v}"
           manifest=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+
+          # Three files carry the version and all are bumped by hand, so check
+          # them together — flake.nix and server.json are otherwise never
+          # validated and would drift silently.
+          flake=$(grep -m1 'version = "' flake.nix | cut -d'"' -f2)
+          server=$(python3 -c "import json;print(json.load(open('server.json'))['version'])")
+          server_pkg=$(python3 -c "import json;print(json.load(open('server.json'))['packages'][0]['version'])")
+
+          fail=0
+          for pair in "Cargo.toml:$manifest" "flake.nix:$flake" \
+                      "server.json:$server" "server.json packages[0]:$server_pkg"; do
+            file="${pair%%:*}"; value="${pair##*:}"
+            if [ "$value" != "$tag" ]; then
+              echo "::error::${file} says ${value} but the tag is v${tag}"
+              fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ] || exit 1
 
           # Publishing the wrong version is unfixable, so refuse on a mismatch
           # rather than shipping whatever the manifest happened to say.
@@ -218,6 +236,57 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish
+
+  # Lists portview in the official MCP Registry, which is how MCP clients and
+  # directories discover servers.
+  #
+  # Runs after publish-crate on purpose: the registry verifies ownership by
+  # fetching the crate's README from crates.io and looking for the `mcp-name:`
+  # token, so the version must already be there.
+  publish-mcp:
+    needs: [publish-crate]
+    runs-on: ubuntu-latest
+    permissions:
+      # OIDC proves this repo owns the io.github.mapika/* namespace, so no
+      # long-lived token needs to exist as a secret.
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install mcp-publisher
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" \
+            | tar xz mcp-publisher
+          chmod +x mcp-publisher
+
+      - name: Validate server.json
+        run: ./mcp-publisher validate
+
+      - name: Wait for the crate README to appear on crates.io
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          # Ownership verification reads the rendered README, which lags the
+          # publish by a little. Poll rather than race it.
+          for _ in $(seq 1 20); do
+            if curl -fsSL -H 'User-Agent: portview-release-workflow' \
+                 "https://crates.io/api/v1/crates/portview/${version}" >/dev/null 2>&1; then
+              echo "crates.io has ${version}"
+              sleep 15
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::error::portview ${version} did not appear on crates.io in time"
+          exit 1
+
+      - name: Authenticate to the MCP Registry
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish to the MCP Registry
+        run: ./mcp-publisher publish
 
   update-homebrew:
     needs: [release]

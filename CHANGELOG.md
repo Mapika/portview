@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.0.1
+
+No functional changes. This release exists so portview can be listed in the
+[MCP Registry](https://registry.modelcontextprotocol.io), which verifies
+ownership by looking for an `mcp-name:` token in the crate's README on
+crates.io — and 2.0.0's README predates it. crates.io versions are immutable,
+so the token cannot be added retroactively.
+
+- Listed in the official MCP Registry as `io.github.mapika/portview`
+- Release workflow now publishes to the MCP Registry, and checks the tag against
+  `Cargo.toml`, `flake.nix`, and `server.json` together
+
 ## 2.0.0
 
 ### Breaking

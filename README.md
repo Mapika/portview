@@ -111,6 +111,9 @@ Pass `--read-only` to withhold `kill_port` entirely, so the agent can look but n
 portview mcp --read-only
 ```
 
+Listed in the [MCP Registry](https://registry.modelcontextprotocol.io) as
+`mcp-name: io.github.mapika/portview`.
+
 ### Watch mode (interactive TUI)
 
 ```bash
