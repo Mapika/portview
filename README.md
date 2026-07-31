@@ -164,7 +164,7 @@ There's a GitHub Action, so a workflow can fail when a service ends up exposed
 or a test run leaks connections:
 
 ```yaml
-- uses: mapika/portview@v1
+- uses: mapika/portview@v2
   with:
     fail-on: error        # error | warning | never
 ```
@@ -173,7 +173,7 @@ It annotates each finding inline on the run, writes a summary table, and exposes
 `findings` (JSON), `count`, `errors`, and `warnings` as step outputs:
 
 ```yaml
-- uses: mapika/portview@v1
+- uses: mapika/portview@v2
   id: doctor
   with:
     fail-on: never
