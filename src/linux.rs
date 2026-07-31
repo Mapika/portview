@@ -343,9 +343,39 @@ pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
             continue;
         }
 
+        // No resolvable owner. Two causes, indistinguishable to the caller and
+        // both previously hidden: the socket has no owning process at all
+        // (TIME_WAIT outlives it, inode 0), or it belongs to another user and
+        // we are not root, so /proc/<pid>/fd was unreadable.
+        //
+        // These are listed with placeholders rather than dropped. Hiding them
+        // made portview under-report: a root-owned listener on :53 simply did
+        // not appear for a non-root user, who would reasonably conclude the
+        // port was free.
         let pid = match inode_map.get(&sock.inode) {
             Some(&p) => p,
-            None => continue,
+            None => {
+                infos.push(PortInfo {
+                    port: sock.local_port,
+                    protocol: sock
+                        .protocol
+                        .strip_suffix('6')
+                        .unwrap_or(&sock.protocol)
+                        .to_string(),
+                    pid: 0,
+                    ppid: 0,
+                    process_name: String::new(),
+                    command: String::new(),
+                    user: String::new(),
+                    state: sock.state,
+                    memory_bytes: 0,
+                    cpu_seconds: 0.0,
+                    start_time: None,
+                    children: 0,
+                    local_addr: sock.local_addr,
+                });
+                continue;
+            }
         };
 
         let (uid, ppid, rss_bytes) = parse_proc_status(pid);
@@ -372,9 +402,6 @@ pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
         });
     }
 
-    // Drop entries where we couldn't read process details (other user's process without sudo)
-    infos.retain(|i| !i.process_name.is_empty());
-
     // Sort by port number, then protocol, then pid (pid needed for dedup_by adjacency)
     infos.sort_by(|a, b| {
         a.port
@@ -383,8 +410,27 @@ pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
             .then_with(|| a.pid.cmp(&b.pid))
     });
 
-    // Deduplicate (same port+proto+pid can appear for v4 and v6)
-    infos.dedup_by(|a, b| a.port == b.port && a.protocol == b.protocol && a.pid == b.pid);
+    // Deduplicate listeners only: one process listening on both v4 and v6 is a
+    // single logical listener and should appear once.
+    //
+    // Connections are NOT deduplicated. Each established or TIME_WAIT socket is
+    // a distinct connection, and collapsing them by (port, protocol, pid) is
+    // what made `--all` report a single row where the kernel had sixty — and
+    // what made doctor's leak findings impossible to corroborate on screen.
+    let (mut listeners, connections): (Vec<PortInfo>, Vec<PortInfo>) = infos
+        .into_iter()
+        .partition(|i| i.state == TcpState::Listen || i.protocol.starts_with("UDP"));
+
+    listeners.dedup_by(|a, b| a.port == b.port && a.protocol == b.protocol && a.pid == b.pid);
+
+    let mut infos = listeners;
+    infos.extend(connections);
+    infos.sort_by(|a, b| {
+        a.port
+            .cmp(&b.port)
+            .then_with(|| a.protocol.cmp(&b.protocol))
+            .then_with(|| a.pid.cmp(&b.pid))
+    });
 
     infos
 }

@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+**Ports whose owner could not be resolved were hidden entirely.** This is the
+worst failure mode for a port viewer: it reported a port as free when something
+was listening on it. On a normal Linux user account, `ss -tlnH` showed a
+root-owned listener on `:53` while `portview` reported no TCP listeners at all.
+
+Such sockets are now listed with `-` in the columns that cannot be filled, on
+Linux and Windows. Two causes, previously indistinguishable because both were
+silently dropped: the socket belongs to another user and `/proc/<pid>/fd` is
+unreadable without `sudo`, or nothing owns it at all (`TIME_WAIT` outlives the
+process that opened it).
+
+macOS is unchanged here — it enumerates sockets per process, so a process that
+cannot be opened contributes nothing to enumerate in the first place.
+
+**`--all` collapsed connections, contradicting `doctor`.** Non-listening rows
+were deduplicated by `(port, protocol, pid)`, so sixty `TIME_WAIT` sockets on
+one port rendered as a single row. `doctor` would report a connection leak that
+`--all` then appeared to disprove. Connections are now one row each; listeners
+are still deduplicated, since a process bound to both v4 and v6 is one listener.
+
 ## 2.0.2
 
 No functional changes. Corrects the MCP Registry namespace, which is

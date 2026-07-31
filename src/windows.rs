@@ -559,8 +559,12 @@ pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
         }
     }
 
-    // Drop entries where we couldn't read process details (other user's process without elevated privileges)
-    infos.retain(|i| !i.process_name.is_empty());
+    // Entries whose process details could not be read are kept rather than
+    // dropped. GetExtendedTcpTable still gave us the owning PID, so the row is
+    // useful even unnamed — and hiding it made portview under-report, which for
+    // a port viewer is the worst failure mode: a system-owned listener simply
+    // vanished for an unelevated user, who would read that as a free port.
+    // Unnamed fields render as "-".
 
     // Sort by port number, then protocol, then pid (pid needed for dedup_by adjacency)
     infos.sort_by(|a, b| {
@@ -570,8 +574,24 @@ pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
             .then_with(|| a.pid.cmp(&b.pid))
     });
 
-    // Deduplicate (same port+proto+pid can appear for v4 and v6)
-    infos.dedup_by(|a, b| a.port == b.port && a.protocol == b.protocol && a.pid == b.pid);
+    // Deduplicate listeners only: one process listening on both v4 and v6 is a
+    // single logical listener. Connections stay distinct — each established or
+    // TIME_WAIT socket is its own connection, and collapsing them by
+    // (port, protocol, pid) hid genuine connection pile-ups.
+    let (mut listeners, connections): (Vec<PortInfo>, Vec<PortInfo>) = infos
+        .into_iter()
+        .partition(|i| i.state == TcpState::Listen || i.protocol.starts_with("UDP"));
+
+    listeners.dedup_by(|a, b| a.port == b.port && a.protocol == b.protocol && a.pid == b.pid);
+
+    let mut infos = listeners;
+    infos.extend(connections);
+    infos.sort_by(|a, b| {
+        a.port
+            .cmp(&b.port)
+            .then_with(|| a.protocol.cmp(&b.protocol))
+            .then_with(|| a.pid.cmp(&b.pid))
+    });
 
     infos
 }

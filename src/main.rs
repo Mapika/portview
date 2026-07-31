@@ -56,6 +56,38 @@ pub(crate) struct PortInfo {
     pub(crate) local_addr: IpAddr,
 }
 
+/// What is behind a row.
+///
+/// `pid == 0` alone is ambiguous: it marks both synthesised Docker rows and
+/// sockets whose owner we could not resolve. They render differently, so the
+/// distinction is made once here rather than re-derived at each call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OwnerKind {
+    /// A real process we could read.
+    Process,
+    /// A container-published port with no host process.
+    Container,
+    /// A socket with no resolvable owner: either nothing owns it (TIME_WAIT
+    /// outlives its process) or it belongs to another user and we are not root.
+    /// Listed with placeholders rather than hidden — a port viewer that omits
+    /// ports is worse than one that admits it cannot name the owner.
+    Unowned,
+}
+
+impl PortInfo {
+    pub(crate) fn owner_kind(&self) -> OwnerKind {
+        if self.pid != 0 {
+            OwnerKind::Process
+        } else if self.user == "docker" {
+            // The only producer of pid-0 rows with a user is
+            // `synthesize_docker_entries`, which always sets exactly this.
+            OwnerKind::Container
+        } else {
+            OwnerKind::Unowned
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum TcpState {
     Listen,
@@ -637,21 +669,32 @@ fn display_table(
         } else {
             info.pid.to_string()
         };
+        // A socket whose owner we could not resolve still gets a row; blank
+        // cells would read as a rendering fault, so unknown fields show "-"
+        // exactly like the numeric columns already do.
+        let dash_if_empty = |s: &str| {
+            if s.is_empty() {
+                "-".to_string()
+            } else {
+                s.to_string()
+            }
+        };
         let base_values = [
             info.port.to_string(),
             info.protocol.clone(),
             pid_str,
             info.local_addr.to_string(),
-            info.user.clone(),
-            info.process_name.clone(),
+            dash_if_empty(&info.user),
+            dash_if_empty(&info.process_name),
             uptime_str,
             mem_str,
         ];
 
+        let command = dash_if_empty(&info.command);
         let cmd_lines = if wide {
-            wrap_cmd(&info.command, actual_cmd_w)
+            wrap_cmd(&command, actual_cmd_w)
         } else {
-            vec![info.command.clone()]
+            vec![command]
         };
 
         for (line_idx, cmd_line) in cmd_lines.iter().enumerate() {
@@ -718,7 +761,7 @@ fn display_detail(info: &PortInfo, use_color: bool) {
     let mut out = io::stdout();
     let bind_str = format!("{}:{}", format_addr(&info.local_addr), info.port);
     let uptime = format_uptime(info.start_time);
-    let is_docker = info.pid == 0;
+    let is_docker = info.owner_kind() == OwnerKind::Container;
 
     let _ = writeln!(out);
     if use_color {
@@ -1847,6 +1890,61 @@ mod tests {
     }
 
     // ── wrap_cmd ───────────────────────────────────────────────────
+
+    fn port_fixture(port: u16, pid: u32, name: &str) -> PortInfo {
+        PortInfo {
+            port,
+            protocol: "TCP".to_string(),
+            pid,
+            ppid: 1,
+            process_name: name.to_string(),
+            command: "cmd".to_string(),
+            user: "mark".to_string(),
+            state: TcpState::Listen,
+            memory_bytes: 1024,
+            cpu_seconds: 0.0,
+            start_time: None,
+            children: 0,
+            local_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+        }
+    }
+
+    #[test]
+    fn owner_kind_distinguishes_container_from_unowned() {
+        // pid == 0 alone is ambiguous: it marks both synthesised Docker rows
+        // and sockets with no resolvable owner. They render differently.
+        let mut p = port_fixture(8080, 42, "app");
+        assert_eq!(p.owner_kind(), OwnerKind::Process);
+
+        p.pid = 0;
+        p.user = "docker".to_string();
+        p.process_name = "pv-nginx".to_string();
+        assert_eq!(p.owner_kind(), OwnerKind::Container);
+
+        // No owner: TIME_WAIT, or another user's process without root.
+        p.user = String::new();
+        p.process_name = String::new();
+        assert_eq!(p.owner_kind(), OwnerKind::Unowned);
+    }
+
+    #[test]
+    fn unowned_rows_serialise_with_null_start_time_and_zero_pid() {
+        // These rows exist so ports are not hidden; the JSON has to survive
+        // them too, since MCP and remote scans both parse it.
+        let mut p = port_fixture(53, 0, "");
+        p.user = String::new();
+        p.command = String::new();
+        p.start_time = None;
+
+        let json = port_info_json(&p, None);
+        assert!(json.contains(r#""pid":0"#), "{}", json);
+        assert!(json.contains(r#""start_time_unix":null"#), "{}", json);
+        // Must round-trip: remote scans parse exactly this.
+        let parsed = crate::ssh::parse_port_json(&format!("[{}]", json)).unwrap();
+        assert_eq!(parsed[0].port, 53);
+        assert_eq!(parsed[0].pid, 0);
+        assert_eq!(parsed[0].owner_kind(), OwnerKind::Unowned);
+    }
 
     #[test]
     fn wrap_cmd_empty() {

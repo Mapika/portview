@@ -578,7 +578,14 @@ pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {
     }
 
     // Drop entries where we couldn't read process details (other user's process without sudo)
-    infos.retain(|i| !i.process_name.is_empty());
+    // Kept rather than dropped: if we enumerated a socket but could not name
+    // its process, the port is still real and hiding it under-reports. Unnamed
+    // fields render as "-".
+    //
+    // Note this cannot recover another user's ports on macOS the way it does on
+    // Linux and Windows: sockets are enumerated per-process via proc_pidfdinfo,
+    // so a process we cannot open contributes no sockets to enumerate in the
+    // first place. There is no socket table to diff against.
 
     // Sort by port number, then protocol, then pid (pid needed for dedup_by adjacency)
     infos.sort_by(|a, b| {
