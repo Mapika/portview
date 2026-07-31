@@ -295,7 +295,10 @@ fn filetime_to_system_time(ft_low: u32, ft_high: u32) -> Option<SystemTime> {
     let unix_100ns = ticks - FILETIME_UNIX_OFFSET;
     let secs = unix_100ns / 10_000_000;
     let nanos = ((unix_100ns % 10_000_000) * 100) as u32;
-    Some(UNIX_EPOCH + Duration::new(secs, nanos))
+    // `UNIX_EPOCH + Duration` panics when the result is unrepresentable. On
+    // Windows a SystemTime is FILETIME-backed and tops out near year 30828,
+    // which a garbage or maliciously-large creation time overshoots easily.
+    UNIX_EPOCH.checked_add(Duration::new(secs, nanos))
 }
 
 fn get_process_name_and_path(handle: HANDLE) -> (String, String) {
@@ -654,9 +657,10 @@ mod tests {
 
     #[test]
     fn filetime_to_system_time_far_future_no_panic() {
-        // Should not panic even with very large values
-        let result = filetime_to_system_time(u32::MAX, u32::MAX);
-        assert!(result.is_some());
+        // Beyond the Windows SystemTime range, so this is None here — the
+        // contract being tested is that it returns rather than panicking.
+        // Asserting is_some() was what made this test panic instead of fail.
+        assert_eq!(filetime_to_system_time(u32::MAX, u32::MAX), None);
     }
 
     #[test]
