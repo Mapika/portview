@@ -22,6 +22,14 @@
 
 ### Fixed
 
+**`portview ssh <host> --json` did not work at all.** It failed one of two ways
+depending on the far end. With portview installed there, `--json` is also the
+transport this side parses back, so the user's flag was appended to the injected
+one and the remote clap rejected `--json --json` — the command died with an SSH
+error. Without it, agentless collection succeeded and then rendered a table,
+silently ignoring the flag. Both paths now emit JSON, and an empty result is
+`[]` rather than prose, since this output gets piped.
+
 **A far-future process creation time panicked the scan on Windows.** Converting
 a `FILETIME` used `UNIX_EPOCH + Duration`, which panics when the result is
 unrepresentable. A Windows `SystemTime` is itself `FILETIME`-backed and ends
