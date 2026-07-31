@@ -7,7 +7,9 @@
 //!
 //! This module removes that requirement by shipping a small POSIX shell probe
 //! over the existing SSH connection and parsing what comes back. It uses only
-//! `ss`, `ps`, and `readlink` — present on effectively every Linux host.
+//! `ss`, `ps`, and `readlink` — present on effectively every Linux host — and
+//! falls back to `lsof` where `ss` does not exist, which covers macOS and the
+//! BSDs.
 //!
 //! The probe emits sections separated by `#MARKER` lines rather than trying to
 //! join the data in shell, which keeps the remote side trivial and puts all the
@@ -36,14 +38,23 @@ use crate::{PortInfo, TcpState};
 /// of the data. Keeping `#` and the name apart means the script text can appear
 /// in its own output harmlessly.
 pub(crate) const PROBE: &str = r#"
+L=
 T=$(ss -tanp 2>/dev/null || true)
 U=$(ss -uanp 2>/dev/null || true)
-if [ -z "$T" ] && [ -z "$U" ]; then printf '#%s\n' NOSS; exit 0; fi
-printf '#%s\n%s\n#%s\n%s\n' TCP "$T" UDP "$U"
-printf '#%s\n' PROC
-ps -eo pid=,ppid=,user=,rss=,etimes=,times=,args= 2>/dev/null || true
+if [ -n "$T" ] || [ -n "$U" ]; then
+  printf '#%s\n%s\n#%s\n%s\n' TCP "$T" UDP "$U"
+else
+  L=$(lsof -nP -i +c 0 2>/dev/null || true)
+  if [ -z "$L" ]; then printf '#%s\n' NOSS; exit 0; fi
+  printf '#%s\n%s\n' LSOF "$L"
+fi
+P=$(ps -eo pid=,ppid=,user=,rss=,etimes=,times=,args= 2>/dev/null || true)
+if [ -z "$P" ]; then P=$(ps -eo pid=,ppid=,user=,rss=,etime=,time=,args= 2>/dev/null || true); fi
+printf '#%s\n%s\n' PROC "$P"
 printf '#%s\n' EXE
-printf '%s\n%s\n' "$T" "$U" | tr ',' '\n' | sed -n 's/^pid=\([0-9]*\).*/\1/p' | sort -u |
+{ printf '%s\n%s\n' "$T" "$U" | tr ',' '\n' | sed -n 's/^pid=\([0-9]*\).*/\1/p'
+  printf '%s\n' "$L" | awk '$2 ~ /^[0-9]+$/ { print $2 }'
+} | sort -u |
 while read p; do
   l=$(readlink "/proc/$p/exe" 2>/dev/null) && printf '%s\t%s\n' "$p" "$l"
 done
@@ -68,14 +79,15 @@ pub(crate) fn parse_probe(output: &str) -> Result<Vec<PortInfo>, String> {
     // contain a command line that mentions this marker.
     if output.lines().any(|l| l.trim_end() == "#NOSS") {
         return Err(
-            "remote host has neither portview nor `ss`. Install portview there, \
-             or install iproute2."
+            "remote host has neither portview, `ss`, nor `lsof`. Install portview \
+             there, or install iproute2 (Linux) or lsof."
                 .to_string(),
         );
     }
 
     let tcp = section(output, "#TCP");
     let udp = section(output, "#UDP");
+    let lsof = section(output, "#LSOF");
     let procs = parse_ps(&section(output, "#PROC"));
     let exes = parse_exe(&section(output, "#EXE"));
 
@@ -90,38 +102,44 @@ pub(crate) fn parse_probe(output: &str) -> Result<Vec<PortInfo>, String> {
     let now = SystemTime::now();
     let mut infos = Vec::new();
 
+    // Only one of the two collectors ever runs, so these are never both
+    // populated — but joining them uniformly keeps the rest of the pipeline
+    // unaware of which one produced the rows.
+    let mut socks: Vec<SockLine> = Vec::new();
     for (text, is_udp) in [(tcp, false), (udp, true)] {
-        for line in text.lines() {
-            let Some(sock) = parse_ss_line(line, is_udp) else {
-                continue;
-            };
+        socks.extend(text.lines().filter_map(|l| parse_ss_line(l, is_udp)));
+    }
+    socks.extend(lsof.lines().filter_map(parse_lsof_line));
 
-            let proc = procs.get(&sock.pid);
-            // Prefer the executable, matching local behaviour: `ss` reports the
-            // thread name, so a Node server shows up as "MainThread" otherwise.
-            let process_name = exes
-                .get(&sock.pid)
-                .map(|p| basename(p).to_string())
-                .filter(|s| !s.is_empty())
-                .or_else(|| sock.name.clone())
-                .unwrap_or_default();
+    for sock in socks {
+        let proc = procs.get(&sock.pid);
+        // Prefer the executable, matching local behaviour: both `ss` and `lsof`
+        // report the thread name on Linux, so a Node server shows up as
+        // "MainThread" otherwise. On macOS there is no `/proc` to read, but
+        // `lsof` there names the process rather than the thread, so the
+        // fallback below is already correct.
+        let process_name = exes
+            .get(&sock.pid)
+            .map(|p| basename(p).to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| sock.name.clone())
+            .unwrap_or_default();
 
-            infos.push(PortInfo {
-                port: sock.port,
-                protocol: sock.protocol,
-                pid: sock.pid,
-                ppid: proc.map(|p| p.ppid).unwrap_or(0),
-                process_name,
-                command: proc.map(|p| p.args.clone()).unwrap_or_default(),
-                user: proc.map(|p| p.user.clone()).unwrap_or_default(),
-                state: sock.state,
-                memory_bytes: proc.map(|p| p.rss_kb * 1024).unwrap_or(0),
-                cpu_seconds: proc.map(|p| p.cpu_seconds).unwrap_or(0.0),
-                start_time: proc.and_then(|p| now.checked_sub(Duration::from_secs(p.etimes))),
-                children: child_counts.get(&sock.pid).copied().unwrap_or(0),
-                local_addr: sock.addr,
-            });
-        }
+        infos.push(PortInfo {
+            port: sock.port,
+            protocol: sock.protocol,
+            pid: sock.pid,
+            ppid: proc.map(|p| p.ppid).unwrap_or(0),
+            process_name,
+            command: proc.map(|p| p.args.clone()).unwrap_or_default(),
+            user: proc.map(|p| p.user.clone()).unwrap_or_default(),
+            state: sock.state,
+            memory_bytes: proc.map(|p| p.rss_kb * 1024).unwrap_or(0),
+            cpu_seconds: proc.map(|p| p.cpu_seconds).unwrap_or(0.0),
+            start_time: proc.and_then(|p| now.checked_sub(Duration::from_secs(p.etimes))),
+            children: child_counts.get(&sock.pid).copied().unwrap_or(0),
+            local_addr: sock.addr,
+        });
     }
 
     // Match the local pipeline: deduplicate listeners only.
@@ -271,6 +289,98 @@ fn parse_ss_line(line: &str, is_udp: bool) -> Option<SockLine> {
     })
 }
 
+// ── lsof ─────────────────────────────────────────────────────────────
+
+/// Map an `lsof` state token. `lsof` separates words with underscores
+/// (`FIN_WAIT2`, `SYN_RCVD`) where `ss` uses hyphens and its own abbreviations,
+/// so the two spellings cannot share a mapping.
+fn state_from_lsof(s: &str) -> TcpState {
+    match s {
+        "LISTEN" => TcpState::Listen,
+        "ESTABLISHED" => TcpState::Established,
+        "TIME_WAIT" => TcpState::TimeWait,
+        "CLOSE_WAIT" => TcpState::CloseWait,
+        "FIN_WAIT1" => TcpState::FinWait1,
+        "FIN_WAIT2" => TcpState::FinWait2,
+        "SYN_SENT" => TcpState::SynSent,
+        "SYN_RCVD" => TcpState::SynRecv,
+        "CLOSING" => TcpState::Closing,
+        "LAST_ACK" => TcpState::LastAck,
+        "CLOSED" | "IDLE" | "UNCONN" => TcpState::Close,
+        _ => TcpState::Unknown,
+    }
+}
+
+/// Parse one row of `lsof -nP -i +c 0`:
+///
+/// ```text
+/// COMMAND    PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+/// node        6 deploy  21u  IPv4  12345      0t0  TCP 127.0.0.1:3000 (LISTEN)
+/// python3    10 root     3u  IPv4 312131      0t0  UDP 127.0.0.1:5353
+/// ```
+///
+/// Fixed field indices are not safe here: `+c 0` lets COMMAND grow to any
+/// width, and a command name may itself contain spaces. Instead this anchors on
+/// the TYPE column (`IPv4`/`IPv6`) and takes the first protocol token after it,
+/// which brackets the columns that matter regardless of what precedes them.
+fn parse_lsof_line(line: &str) -> Option<SockLine> {
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    if fields.len() < 8 || fields[0] == "COMMAND" {
+        return None;
+    }
+
+    let type_idx = fields.iter().position(|f| *f == "IPv4" || *f == "IPv6")?;
+    let is_v6 = fields[type_idx] == "IPv6";
+    let proto_idx = fields[type_idx + 1..]
+        .iter()
+        .position(|f| *f == "TCP" || *f == "UDP")
+        .map(|i| i + type_idx + 1)?;
+    let is_udp = fields[proto_idx] == "UDP";
+
+    // A connected socket prints `local->peer`; only the local end is ours.
+    let local = fields.get(proto_idx + 1)?.split("->").next()?;
+    let (addr, port) = parse_addr_port(local)?;
+    if port == 0 {
+        return None;
+    }
+    // `lsof` prints either family's wildcard bind as `*:port`, so TYPE is the
+    // only surviving evidence of which one it was.
+    let addr = match addr {
+        IpAddr::V4(a) if a.is_unspecified() && is_v6 => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+        other => other,
+    };
+
+    // UDP rows carry no state at all, and portview treats a bound UDP socket as
+    // listening — matching how the `ss` path handles the same case.
+    let state = if is_udp {
+        TcpState::Listen
+    } else {
+        fields
+            .get(proto_idx + 2)
+            .map(|s| state_from_lsof(s.trim_matches(['(', ')'])))
+            .unwrap_or(TcpState::Unknown)
+    };
+
+    // PID is the field right before USER, which is the one after COMMAND only
+    // when COMMAND has no spaces — so scan for the first purely numeric field
+    // instead, bounded by the TYPE anchor.
+    let pid = fields[..type_idx]
+        .iter()
+        .find_map(|f| f.parse::<u32>().ok())
+        .unwrap_or(0);
+
+    Some(SockLine {
+        protocol: if is_udp { "UDP" } else { "TCP" }.to_string(),
+        state,
+        addr,
+        port,
+        pid,
+        name: Some(fields[0].to_string()),
+    })
+}
+
+// ── ss (shared helpers) ──────────────────────────────────────────────
+
 /// Split an `ss` address column into address and port.
 ///
 /// Handles `127.0.0.1:3000`, `[::1]:8080`, `*:22`, and `0.0.0.0:*`.
@@ -347,8 +457,11 @@ fn parse_ps(text: &str) -> HashMap<u32, ProcRow> {
         let ppid = tokens[1].parse::<u32>().unwrap_or(0);
         let user = tokens[2].to_string();
         let rss_kb = tokens[3].parse::<u64>().unwrap_or(0);
-        let etimes = tokens[4].parse::<u64>().unwrap_or(0);
-        let cpu_seconds = parse_cpu_time(tokens[5]);
+        // `etimes` is plain seconds, but it is a procps extension; the BSD and
+        // macOS fallback uses `etime`, which is `[[DD-]HH:]MM:SS`. Both reach
+        // here, so both have to parse.
+        let etimes = parse_duration_seconds(tokens[4]) as u64;
+        let cpu_seconds = parse_duration_seconds(tokens[5]);
 
         // Recover args by skipping the six fixed fields in the original line,
         // preserving whatever internal spacing the command had.
@@ -392,8 +505,12 @@ fn nth_field_onward(line: &str, n: usize) -> String {
     String::new()
 }
 
-/// `ps -o times=` yields plain seconds, but some implementations emit `[DD-]HH:MM:SS`.
-fn parse_cpu_time(s: &str) -> f64 {
+/// Seconds from either a plain count or a `[[DD-]HH:]MM:SS` clock.
+///
+/// `ps -o times=`/`etimes=` yield plain seconds, but those are procps
+/// extensions; the BSD spellings `time=`/`etime=` are formatted instead, and
+/// macOS offers only those.
+fn parse_duration_seconds(s: &str) -> f64 {
     if let Ok(v) = s.parse::<f64>() {
         return v;
     }
@@ -616,6 +733,99 @@ State Recv-Q Send-Q Local Address:Port Peer Address:PortProcess
         assert!(ports.iter().all(|p| p.port != 0));
     }
 
+    /// Verbatim `lsof -nP -i +c 0` output, captured inside an isolated network
+    /// namespace so it carries nothing about the machine that produced it. The
+    /// `ps` section uses the BSD `etime`/`time` spellings, which is what the
+    /// probe falls back to on the hosts that need `lsof` in the first place.
+    const REAL_LSOF: &str = "\
+#LSOF
+COMMAND    PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+python3     10 root    3u  IPv4 312131      0t0  UDP 127.0.0.1:5353
+python3     10 root    4u  IPv6 312132      0t0  UDP [::1]:5354
+python3     10 root    5u  IPv6 312133      0t0  TCP *:9443 (LISTEN)
+python3     10 root    6u  IPv4 312134      0t0  TCP *:9000 (LISTEN)
+MainThread  14 root   21u  IPv4 306671      0t0  TCP 127.0.0.1:8080 (LISTEN)
+MainThread  18 root   21u  IPv4 312495      0t0  TCP 127.0.0.1:7000 (LISTEN)
+MainThread  18 root   22u  IPv4 312496      0t0  TCP 127.0.0.1:35308->127.0.0.1:7000 (FIN_WAIT2)
+MainThread  18 root   38u  IPv4 302430      0t0  TCP 127.0.0.1:7000->127.0.0.1:35308 (CLOSE_WAIT)
+MainThread  18 root   39u  IPv4 302431      0t0  TCP 127.0.0.1:7000->127.0.0.1:35310 (CLOSE_WAIT)
+#PROC
+    1     0 root      3200       00:02 00:00:00 /bin/sh
+   10     1 root     10880       00:01 00:00:00 python3 -
+   14    11 root     45276       00:01 00:00:00 node /opt/app/api.js
+   18    13 root     46448       00:01 00:00:04 node /opt/app/ingest.js
+#END
+";
+
+    #[test]
+    fn parses_verbatim_lsof_output_from_a_real_host() {
+        let ports = parse_probe(REAL_LSOF).unwrap();
+
+        let udp = ports.iter().find(|p| p.port == 5353).unwrap();
+        assert_eq!(udp.protocol, "UDP");
+        // UDP rows carry no state column at all; a bound socket counts as
+        // listening, matching the `ss` path.
+        assert_eq!(udp.state, TcpState::Listen);
+        assert_eq!(udp.process_name, "python3");
+        assert_eq!(udp.user, "root");
+        assert_eq!(udp.memory_bytes, 10880 * 1024);
+
+        let listen = ports.iter().find(|p| p.port == 8080).unwrap();
+        assert_eq!(listen.state, TcpState::Listen);
+        assert_eq!(listen.command, "node /opt/app/api.js");
+
+        // `time=00:00:04` is a clock, not a plain second count.
+        let ingest = ports.iter().find(|p| p.port == 7000).unwrap();
+        assert_eq!(ingest.cpu_seconds, 4.0);
+
+        assert!(ports.iter().all(|p| p.port != 0));
+        assert!(
+            !ports.iter().any(|p| p.process_name == "COMMAND"),
+            "the header line survived as a row"
+        );
+    }
+
+    #[test]
+    fn lsof_wildcard_keeps_the_address_family() {
+        // `lsof` prints both families' wildcard bind as `*:port`, so only the
+        // TYPE column distinguishes them. Getting this wrong would report an
+        // IPv6-only listener as though it were bound to 0.0.0.0.
+        let ports = parse_probe(REAL_LSOF).unwrap();
+
+        let v6 = ports.iter().find(|p| p.port == 9443).unwrap();
+        assert_eq!(v6.local_addr, IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED));
+
+        let v4 = ports.iter().find(|p| p.port == 9000).unwrap();
+        assert_eq!(v4.local_addr, IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+    }
+
+    #[test]
+    fn lsof_connection_rows_use_the_local_end() {
+        // A connected socket prints `local->peer`. Taking the peer instead
+        // would invent ports that are not on this host at all.
+        let ports = parse_probe(REAL_LSOF).unwrap();
+        assert!(
+            ports.iter().all(|p| p.port != 35310),
+            "a peer port leaked into the results: {:#?}",
+            ports
+        );
+        let fin = ports
+            .iter()
+            .find(|p| p.port == 35308 && p.state == TcpState::FinWait2)
+            .expect("local end of the FIN_WAIT2 socket");
+        assert_eq!(fin.pid, 18);
+    }
+
+    #[test]
+    fn lsof_connections_survive_for_leak_detection() {
+        // The same trap the `ss` path had: collapsing connections by
+        // (port, protocol, pid) hides a CLOSE_WAIT pile-up, and remote doctor
+        // counts exactly these rows.
+        let ports = parse_probe(REAL_LSOF).unwrap();
+        let counts = stale_counts(&ports);
+        assert_eq!(counts.get(&(7000, TcpState::CloseWait)), Some(&2));
+    }
+
     #[test]
     fn header_only_udp_section_yields_nothing() {
         let ports = parse_probe(REAL).unwrap();
@@ -627,7 +837,7 @@ State Recv-Q Send-Q Local Address:Port Peer Address:PortProcess
         // The probe's own command line shows up in its `ps` output. If a marker
         // were spelled literally in the script, it would appear mid-data and be
         // read as a section boundary.
-        for marker in ["#TCP", "#UDP", "#PROC", "#EXE", "#END", "#NOSS"] {
+        for marker in ["#TCP", "#UDP", "#LSOF", "#PROC", "#EXE", "#END", "#NOSS"] {
             assert!(
                 !PROBE.contains(marker),
                 "PROBE contains the literal marker {} — print it as '#%s' instead",
@@ -677,9 +887,9 @@ State Recv-Q Send-Q Local Address:Port Peer Address:PortProcess
 
     #[test]
     fn cpu_time_accepts_seconds_and_clock_format() {
-        assert_eq!(parse_cpu_time("12"), 12.0);
-        assert_eq!(parse_cpu_time("00:02:00"), 120.0);
-        assert_eq!(parse_cpu_time("1-00:00:00"), 86_400.0);
+        assert_eq!(parse_duration_seconds("12"), 12.0);
+        assert_eq!(parse_duration_seconds("00:02:00"), 120.0);
+        assert_eq!(parse_duration_seconds("1-00:00:00"), 86_400.0);
     }
 
     #[test]
