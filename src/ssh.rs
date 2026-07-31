@@ -174,13 +174,27 @@ pub(crate) fn run_ssh(
             run_ssh_passthrough(&ssh, &args);
         }
         _ => {
-            let mut args = vec!["--json"];
-            for arg in &remote_args {
-                args.push(arg.as_str());
-            }
-            run_ssh_scan(&ssh, &args, use_color, agentless);
+            let (args, want_json) = build_scan_args(&remote_args);
+            let args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            run_ssh_scan(&ssh, &args, use_color, agentless, want_json);
         }
     }
+}
+
+/// Build the remote argument list for a scan, and report whether the user asked
+/// for JSON on this end.
+///
+/// `--json` is always sent to the remote portview, because it is the transport
+/// format this side parses back — which has two consequences worth stating.
+/// A user-typed `--json` has to be *filtered out* rather than appended, since
+/// clap on the far end rejects a repeated flag and the whole command fails. And
+/// the user's intent has to be captured here, because once the flag is in the
+/// list there is no way to tell a requested one from the injected one.
+fn build_scan_args(remote_args: &[String]) -> (Vec<String>, bool) {
+    let want_json = remote_args.iter().any(|a| a == "--json");
+    let mut args = vec!["--json".to_string()];
+    args.extend(remote_args.iter().filter(|a| *a != "--json").cloned());
+    (args, want_json)
 }
 
 /// Diagnose a remote host without portview installed on it.
@@ -242,7 +256,13 @@ fn run_ssh_tui(ssh: &SshCommand, remote_args: &[&str], use_color: bool) {
     }
 }
 
-fn run_ssh_scan(ssh: &SshCommand, remote_args: &[&str], use_color: bool, agentless: bool) {
+fn run_ssh_scan(
+    ssh: &SshCommand,
+    remote_args: &[&str],
+    use_color: bool,
+    agentless: bool,
+    json: bool,
+) {
     let show_all = remote_args.iter().any(|a| *a == "--all" || *a == "-a");
 
     // Anything that is neither a flag nor the injected --json is a filter:
@@ -307,7 +327,10 @@ fn run_ssh_scan(ssh: &SshCommand, remote_args: &[&str], use_color: bool, agentle
         ports
     };
 
-    if ports.is_empty() {
+    if json {
+        // An empty result is `[]`, not prose: this output gets piped.
+        println!("{}", crate::ports_json_string(&ports, None));
+    } else if ports.is_empty() {
         println!("No ports found on remote host.");
     } else {
         let colors = crate::ColorConfig::from_env();
@@ -492,6 +515,37 @@ fn parse_object(obj: &str) -> Result<PortInfo, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn owned(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_user_supplied_json_flag_is_not_sent_twice() {
+        // Regression: the remote clap rejects `--json --json`, so
+        // `portview ssh <host> --json` failed outright whenever portview was
+        // installed on the far end.
+        let (args, want_json) = build_scan_args(&owned(&["--json"]));
+        assert_eq!(args, vec!["--json"]);
+        assert!(want_json);
+    }
+
+    #[test]
+    fn json_is_injected_for_transport_without_being_requested() {
+        let (args, want_json) = build_scan_args(&owned(&["3000"]));
+        assert_eq!(args, vec!["--json", "3000"]);
+        assert!(
+            !want_json,
+            "the injected transport flag must not be read as a request for JSON"
+        );
+    }
+
+    #[test]
+    fn other_arguments_survive_alongside_the_json_flag() {
+        let (args, want_json) = build_scan_args(&owned(&["--all", "--json", "node"]));
+        assert_eq!(args, vec!["--json", "--all", "node"]);
+        assert!(want_json);
+    }
 
     #[test]
     fn parse_single_port() {
