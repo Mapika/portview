@@ -319,6 +319,16 @@ fn check_wildcard_exposure(ports: &[PortInfo]) -> Vec<Diagnostic> {
         "mongod",
         "memcached",
         "elasticsearch",
+        "clickhouse",
+        "cassandra",
+        "rabbitmq",
+        "etcd",
+        "kafka",
+        "influxd",
+        "neo4j",
+        "cockroach",
+        "nats-server",
+        "minio",
     ];
 
     let mut diagnostics = Vec::new();
@@ -563,6 +573,37 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].severity, Severity::Warning);
         assert!(result[0].detail.contains("0.0.0.0"));
+    }
+
+    #[test]
+    fn wildcard_additional_sensitive_processes_flagged_case_insensitively() {
+        let wildcard = IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0));
+        let process_names = [
+            "ClickHouse",
+            "CASSANDRA",
+            "RabbitMQ",
+            "ETCD",
+            "Kafka",
+            "INFLUXD",
+            "Neo4j",
+            "COCKROACH",
+            "NATS-SERVER",
+            "MinIO",
+        ];
+        let ports = process_names
+            .iter()
+            .map(|name| make_port(8000, 100, name, TcpState::Listen, wildcard))
+            .collect::<Vec<_>>();
+
+        let result = check_wildcard_exposure(&ports);
+
+        assert_eq!(result.len(), process_names.len());
+        for (diagnostic, process_name) in result.iter().zip(process_names) {
+            assert_eq!(
+                diagnostic.title,
+                format!("{process_name} exposed on wildcard address")
+            );
+        }
     }
 
     #[test]
