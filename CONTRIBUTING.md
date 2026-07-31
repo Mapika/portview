@@ -45,12 +45,38 @@ cargo run -- watch --docker
 - Keep platform-specific code in the respective platform module
 - `--json` output must work in all display modes
 
+Only Linux can be run here, but the other two platforms can still be
+type-checked — do this before touching `macos.rs`, `windows.rs`, or anything
+they share:
+
+```bash
+cargo check --target aarch64-apple-darwin
+cargo check --target x86_64-pc-windows-msvc
+```
+
 ## Submitting changes
 
 1. Fork the repo and create a branch from `main`
 2. Make your changes
 3. Ensure `cargo test`, `cargo fmt --check`, and `cargo clippy` pass
 4. Open a pull request
+
+## Releasing
+
+1. Bump the version in `Cargo.toml` and `flake.nix` (they must match), and add a
+   `CHANGELOG.md` entry.
+2. Push a full version tag, e.g. `v2.1.0`. That triggers the release workflow:
+   cross-platform builds, checksums, a GitHub release, and the Homebrew formula
+   update. The tag pattern is `v*.*.*`, so partial tags do not fire it.
+3. Move the major tag so `uses: mapika/portview@v2` keeps resolving:
+
+   ```bash
+   git tag -f v2 && git push -f origin v2
+   ```
+
+   Users pin the GitHub Action to the major tag; without this step that
+   reference breaks. This deliberately does not trigger a release.
+4. `cargo publish` is manual and not run by CI.
 
 ## Reporting bugs
 

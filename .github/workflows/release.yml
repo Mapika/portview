@@ -3,7 +3,11 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      # Full versions only. The GitHub Action published from this repo needs a
+      # moving major tag (v2) that users pin with `uses: mapika/portview@v2`,
+      # and a bare 'v*' pattern would fire a whole release build every time that
+      # tag was repointed.
+      - 'v*.*.*'
 
 permissions:
   contents: write
