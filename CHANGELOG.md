@@ -10,6 +10,15 @@
   that drifts. Verified to produce output identical to running `portview doctor`
   on the host itself. The Docker check reports as skipped, since the probe does
   not query Docker on the far end.
+- Agentless SSH now works against **macOS and BSD** remotes. The probe used only
+  `ss`, which is Linux-only, so those hosts reported "remote host has neither
+  portview nor `ss`". It falls back to `lsof -nP -i` where `ss` is absent.
+
+  The `ps` invocation needed the same treatment: `etimes`/`times` are procps
+  extensions that macOS does not have, so the probe falls back to the BSD
+  `etime`/`time` spellings, which are clock-formatted rather than plain seconds.
+  Without that, every lsof-collected port would have come back with no user,
+  memory, or command at all.
 
 ### Fixed
 
