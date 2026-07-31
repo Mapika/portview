@@ -66,7 +66,9 @@ $ portview
 ╰──────┴───────┴─────┴──────────────┴──────┴────────────┴────────┴────────┴────────────────────────────╯
 ```
 
-`--all` includes non-listening connections. `--wide` shows full commands. `--json` for scripting.
+`--all` includes non-listening connections — one row per connection, so a pile-up of `TIME_WAIT` or `CLOSE_WAIT` sockets is visible rather than collapsed. `--wide` shows full commands. `--json` for scripting.
+
+Ports whose owner can't be resolved are still listed, with `-` in the columns that can't be filled. That happens for another user's process without `sudo`, and for sockets like `TIME_WAIT` that outlive the process that opened them.
 
 > The scan, doctor, and MCP examples below are real output, captured by [`demo/record.sh`](demo/README.md) inside an isolated namespace — which is why the user is `root` and the paths are `/opt/app`. The Docker example is illustrative, since it needs a running daemon.
 
@@ -332,9 +334,9 @@ cargo check --target x86_64-pc-windows-msvc
 
 ## Limitations
 
-- **Linux:** Other users' processes require `sudo` (needs `/proc/<pid>/fd/` access)
-- **macOS:** Other users' processes may require `sudo`. Doctor cannot detect TIME_WAIT pileups: sockets are enumerated per process via `proc_pidfdinfo`, and a TIME_WAIT socket outlives the process that owned it. CLOSE_WAIT is detected normally.
-- **Windows:** Some system processes not accessible. Kill always force-terminates. Run as Administrator for full visibility.
+- **Linux:** Other users' ports are listed, but naming the process needs `sudo` (it reads `/proc/<pid>/fd/`). Rows you can't attribute show `-` for PID, user, process, and command rather than being hidden.
+- **macOS:** Other users' ports are *not* listed without `sudo` — sockets are enumerated per process via `proc_pidfdinfo`, so a process that can't be opened contributes nothing to enumerate. For the same reason doctor cannot detect TIME_WAIT pileups there; CLOSE_WAIT is detected normally.
+- **Windows:** Ports owned by inaccessible system processes are listed with the PID but `-` for name and user. Kill always force-terminates. Run as Administrator for full detail.
 - **Docker:** Requires `docker` CLI and daemon access
 - **SSH:** `watch` and `doctor` require portview on the remote host. Scans fall back to agentless collection (`ss` + `ps`), which needs a Linux remote — macOS and BSD hosts still need portview installed.
 
