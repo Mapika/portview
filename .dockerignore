@@ -1,0 +1,9 @@
+# Keep the build context small and the image reproducible.
+target/
+.git/
+.github/
+demo/
+docs/
+aur/
+.playwright-mcp/
+*.mp4

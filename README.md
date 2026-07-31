@@ -310,6 +310,14 @@ cargo build --release
 
 Requires Rust 1.85+ (edition 2024). Shell completions and man page are generated at build time.
 
+There's also a `Dockerfile`. Note that a container has its own network and PID
+namespaces, so portview inside one sees the *container's* ports — share the
+host's namespaces to inspect the host:
+
+```bash
+docker run --rm -i --network host --pid host portview
+```
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines, and

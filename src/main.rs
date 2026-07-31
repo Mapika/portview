@@ -1172,7 +1172,11 @@ pub(crate) fn chrono_free_time() -> String {
     // Read local timezone offset from libc
     let offset_secs: i64 = unsafe {
         let mut tm: libc::tm = std::mem::zeroed();
-        let time = secs_since_epoch as libc::time_t;
+        // The type is inferred from localtime_r's signature rather than written
+        // as libc::time_t, which is deprecated on musl: the alias is due to
+        // widen to 64-bit there, and naming it warns on every musl release
+        // build. Inference stays correct whichever width it ends up being.
+        let time = secs_since_epoch as _;
         libc::localtime_r(&time, &mut tm);
         tm.tm_gmtoff
     };
