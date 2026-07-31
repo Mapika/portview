@@ -160,6 +160,65 @@ jobs:
             SHA256SUMS
           generate_release_notes: true
 
+  # Runs after `release`, so a failure on any build target stops the crate from
+  # going out. That ordering matters: a GitHub release can be deleted, but a
+  # crates.io version can never be — only yanked.
+  publish-crate:
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
+
+      - name: Check the token is configured
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "${CARGO_REGISTRY_TOKEN}" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN is not set, so the crate cannot be published."
+            echo "::error::Create a token at https://crates.io/settings/tokens (scope: publish-update)"
+            echo "::error::then: gh secret set CARGO_REGISTRY_TOKEN --repo Mapika/portview"
+            exit 1
+          fi
+
+      - name: Tag must match Cargo.toml
+        id: check
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          manifest=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+
+          # Publishing the wrong version is unfixable, so refuse on a mismatch
+          # rather than shipping whatever the manifest happened to say.
+          if [ "$tag" != "$manifest" ]; then
+            echo "::error::tag is v${tag} but Cargo.toml says ${manifest}"
+            exit 1
+          fi
+          echo "version=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if this version is already on crates.io
+        id: existing
+        run: |
+          set -euo pipefail
+          version='${{ steps.check.outputs.version }}'
+          # crates.io requires a User-Agent.
+          body=$(curl -fsSL -H 'User-Agent: portview-release-workflow' \
+                   https://crates.io/api/v1/crates/portview/versions || echo '')
+          if printf '%s' "$body" | grep -q "\"num\":\"${version}\""; then
+            echo "portview ${version} is already published; nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to crates.io
+        if: steps.existing.outputs.skip == 'false'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish
+
   update-homebrew:
     needs: [release]
     runs-on: ubuntu-latest
