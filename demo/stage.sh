@@ -62,19 +62,40 @@ record() {
     "$driver" "$session" &
     local driver_pid=$!
 
+    # --window-size is what actually sets the recorded geometry on asciinema 3.
+    # Without it the pty stays at the default 80x24, tmux gets clamped to that
+    # regardless of -x/-y, and portview's table wraps into unreadable fragments.
+    # Do not add `|| true` here: a silent failure produced exactly that bug.
     asciinema rec --quiet --overwrite \
-        --cols "$cols" --rows "$rows" \
+        --window-size "${cols}x${rows}" \
         --command "tmux new-session -s $session -x $cols -y $rows" \
-        "$OUT_DIR/$name.cast" || true
+        "$OUT_DIR/$name.cast"
 
     wait "$driver_pid" 2>/dev/null || true
     tmux kill-session -t "$session" 2>/dev/null || true
 
+    assert_geometry "$OUT_DIR/$name.cast" "$cols" "$rows"
     assert_no_leaks "$OUT_DIR/$name.cast"
 
     echo "==> rendering $name.gif"
     agg --font-size 16 --line-height 1.4 --theme asciinema \
         "$OUT_DIR/$name.cast" "$OUT_DIR/$name.gif"
+}
+
+# The recorded geometry must match what we asked for. portview sizes its table
+# to the terminal, so a recording that silently fell back to 80x24 renders the
+# scan view as wrapped fragments — which is what shipped before this check.
+assert_geometry() {
+    local cast="$1" want_cols="$2" want_rows="$3"
+    local got
+    got=$(head -1 "$cast" | tr ',' '\n' | grep -o '"cols":[0-9]*' | head -1 | cut -d: -f2)
+
+    if [ "$got" != "$want_cols" ]; then
+        echo "error: $cast recorded at ${got:-unknown} columns, expected ${want_cols}." >&2
+        echo "       portview's table needs ~105 columns; anything narrower wraps." >&2
+        exit 1
+    fi
+    echo "==> $cast geometry ok (${want_cols}x${want_rows})"
 }
 
 # Refuse to render anything that captured host identity. The namespace prevents
