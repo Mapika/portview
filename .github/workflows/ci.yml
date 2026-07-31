@@ -102,15 +102,21 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             name: linux-x86_64
+            # Covered by the `quality` job, which runs the suite on Linux.
+            test: false
           - target: x86_64-apple-darwin
             os: macos-14
             name: darwin-x86_64
+            # Cross-compiled on an arm64 runner; binaries are not runnable here.
+            test: false
           - target: aarch64-apple-darwin
             os: macos-14
             name: darwin-aarch64
+            test: true
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             name: windows-x86_64
+            test: true
 
     runs-on: ${{ matrix.os }}
 
@@ -129,6 +135,13 @@ jobs:
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
+
+      # The platform modules (src/windows.rs, src/macos.rs) are `#[cfg]`-gated,
+      # so their tests cannot run in the Linux-only `quality` job. Without this
+      # they are compiled but never executed on any runner.
+      - name: Test
+        if: matrix.test
+        run: cargo test --target ${{ matrix.target }}
 
       - name: Smoke test (Unix)
         if: runner.os != 'Windows'
