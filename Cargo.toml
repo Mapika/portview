@@ -7,7 +7,7 @@ license = "MIT"
 repository = "https://github.com/mapika/portview"
 keywords = ["port", "process", "diagnostic", "network", "cli"]
 categories = ["command-line-utilities"]
-exclude = ["demo.gif", "*.mp4", "aur/", ".github/"]
+exclude = ["*.mp4", "aur/", ".github/", "demo/", "action.yml"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
