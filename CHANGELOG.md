@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.0.2
+
+No functional changes. Corrects the MCP Registry namespace, which is
+case-sensitive and follows the GitHub account's own casing:
+`io.github.Mapika/portview`, not `io.github.mapika/portview`. The registry
+rejected 2.0.1 with a 403 on that mismatch.
+
+Because the ownership token lives in the crate README on crates.io and published
+versions are immutable, the corrected token needs a new version to travel on.
+
 ## 2.0.1
 
 No functional changes. This release exists so portview can be listed in the

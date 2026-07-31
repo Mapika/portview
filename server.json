@@ -1,6 +1,6 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.mapika/portview",
+  "name": "io.github.Mapika/portview",
   "title": "portview",
   "description": "See what's on your ports, the processes behind them, and diagnose conflicts and leaks.",
   "repository": {
@@ -8,12 +8,12 @@
     "source": "github"
   },
   "websiteUrl": "https://github.com/Mapika/portview",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "packages": [
     {
       "registryType": "cargo",
       "identifier": "portview",
-      "version": "2.0.1",
+      "version": "2.0.2",
       "transport": {
         "type": "stdio"
       },
