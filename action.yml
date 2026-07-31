@@ -1,0 +1,193 @@
+name: 'portview doctor'
+description: 'Diagnose port conflicts, wildcard exposure, and connection leaks in CI'
+author: 'mapika'
+
+branding:
+  icon: 'activity'
+  color: 'blue'
+
+inputs:
+  version:
+    description: 'Release tag to install (e.g. v1.6.0), or "latest".'
+    required: false
+    default: 'latest'
+  install:
+    description: 'Install portview. Set false if it is already on PATH.'
+    required: false
+    default: 'true'
+  fail-on:
+    description: 'Fail the job on "error", "warning", or "never".'
+    required: false
+    default: 'error'
+  docker:
+    description: 'Include Docker-published ports in the diagnosis.'
+    required: false
+    default: 'false'
+  summary:
+    description: 'Write the findings table to the job summary.'
+    required: false
+    default: 'true'
+
+outputs:
+  findings:
+    description: 'Findings as a JSON array.'
+    value: ${{ steps.doctor.outputs.findings }}
+  count:
+    description: 'Total number of findings.'
+    value: ${{ steps.doctor.outputs.count }}
+  errors:
+    description: 'Number of findings with severity "error".'
+    value: ${{ steps.doctor.outputs.errors }}
+  warnings:
+    description: 'Number of findings with severity "warning".'
+    value: ${{ steps.doctor.outputs.warnings }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install portview
+      if: inputs.install == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        case "$RUNNER_OS" in
+          Linux)  os=linux ;;
+          macOS)  os=darwin ;;
+          *)
+            echo "::error::portview-doctor supports Linux and macOS runners; got $RUNNER_OS."
+            echo "::error::On Windows, install portview yourself and set install: false."
+            exit 1
+            ;;
+        esac
+
+        case "$(uname -m)" in
+          x86_64|amd64)  arch=x86_64 ;;
+          arm64|aarch64) arch=aarch64 ;;
+          *)
+            echo "::error::unsupported architecture: $(uname -m)"
+            exit 1
+            ;;
+        esac
+
+        asset="portview-${os}-${arch}.tar.gz"
+        version='${{ inputs.version }}'
+        if [ "$version" = "latest" ]; then
+          base="https://github.com/mapika/portview/releases/latest/download"
+        else
+          base="https://github.com/mapika/portview/releases/download/${version}"
+        fi
+
+        dest="${RUNNER_TEMP}/portview"
+        mkdir -p "$dest"
+        cd "$dest"
+
+        echo "Downloading ${asset} (${version})"
+        curl -fsSL --retry 3 -o "$asset" "${base}/${asset}"
+
+        # Releases ship SHA256SUMS; verify rather than trusting the download.
+        if curl -fsSL --retry 3 -o SHA256SUMS "${base}/SHA256SUMS"; then
+          if grep -q " ${asset}\$" SHA256SUMS; then
+            grep " ${asset}\$" SHA256SUMS > expected.txt
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum -c expected.txt
+            else
+              shasum -a 256 -c expected.txt
+            fi
+          else
+            echo "::warning::${asset} not listed in SHA256SUMS; skipping verification."
+          fi
+        else
+          echo "::warning::could not fetch SHA256SUMS; skipping verification."
+        fi
+
+        tar xzf "$asset"
+        chmod +x portview
+        echo "$dest" >> "$GITHUB_PATH"
+
+    - name: Run portview doctor
+      id: doctor
+      shell: bash
+      run: |
+        set -uo pipefail
+
+        if ! command -v portview >/dev/null 2>&1; then
+          echo "::error::portview is not on PATH. Use install: true, or install it first."
+          exit 1
+        fi
+
+        args=(doctor --json)
+        if [ '${{ inputs.docker }}' = 'true' ]; then
+          args+=(--docker)
+        fi
+
+        # doctor exits 1 when it finds an error-severity issue, which is a
+        # result rather than a failure — capture it instead of aborting.
+        findings=$(portview "${args[@]}") || true
+        if [ -z "$findings" ]; then
+          findings='[]'
+        fi
+
+        if ! echo "$findings" | jq empty >/dev/null 2>&1; then
+          echo "::error::portview doctor did not return valid JSON:"
+          echo "$findings"
+          exit 1
+        fi
+
+        count=$(echo "$findings" | jq 'length')
+        errors=$(echo "$findings" | jq '[.[] | select(.severity == "error")] | length')
+        warnings=$(echo "$findings" | jq '[.[] | select(.severity == "warning")] | length')
+
+        # Compact onto one line: multi-line values need heredoc delimiters and
+        # the payload is machine-facing anyway.
+        {
+          echo "findings=$(echo "$findings" | jq -c '.')"
+          echo "count=${count}"
+          echo "errors=${errors}"
+          echo "warnings=${warnings}"
+        } >> "$GITHUB_OUTPUT"
+
+        echo "portview doctor: ${count} finding(s) — ${errors} error(s), ${warnings} warning(s)"
+
+        # Annotate each finding so it shows up inline in the run.
+        echo "$findings" | jq -r '.[] | "\(.severity)\t\(.check)\t\(.title)\t\(.detail)"' |
+        while IFS=$'\t' read -r severity check title detail; do
+          level=warning
+          [ "$severity" = "error" ] && level=error
+          echo "::${level} title=portview: ${title}::${detail} (${check})"
+        done
+
+        if [ '${{ inputs.summary }}' = 'true' ]; then
+          {
+            echo "### portview doctor"
+            echo
+            if [ "$count" -eq 0 ]; then
+              echo "No issues found."
+            else
+              echo "| Severity | Check | Detail |"
+              echo "|---|---|---|"
+              echo "$findings" | jq -r '.[] | "| \(.severity) | \(.check) | \(.detail) |"'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        case '${{ inputs.fail-on }}' in
+          never)
+            ;;
+          warning)
+            if [ "$count" -gt 0 ]; then
+              echo "::error::failing: ${count} finding(s) and fail-on is 'warning'."
+              exit 1
+            fi
+            ;;
+          error)
+            if [ "$errors" -gt 0 ]; then
+              echo "::error::failing: ${errors} error-severity finding(s)."
+              exit 1
+            fi
+            ;;
+          *)
+            echo "::error::invalid fail-on: '${{ inputs.fail-on }}' (expected error, warning, or never)"
+            exit 1
+            ;;
+        esac
