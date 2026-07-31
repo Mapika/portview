@@ -13,6 +13,17 @@
 
 ### Fixed
 
+**A far-future process creation time panicked the scan on Windows.** Converting
+a `FILETIME` used `UNIX_EPOCH + Duration`, which panics when the result is
+unrepresentable. A Windows `SystemTime` is itself `FILETIME`-backed and ends
+near year 30828, so a garbage creation time overflowed it and aborted the run.
+It now returns `None`, which callers already handle.
+
+The test suite could not have caught this: `cargo test` ran only in the Linux
+`quality` job, so the `#[cfg(windows)]` and `#[cfg(macos)]` test modules were
+compiled but never executed on any runner. CI now runs the suite on the
+natively-runnable platform targets as well. Reported by @Guflly.
+
 **Ports whose owner could not be resolved were hidden entirely.** This is the
 worst failure mode for a port viewer: it reported a port as free when something
 was listening on it. On a normal Linux user account, `ss -tlnH` showed a
