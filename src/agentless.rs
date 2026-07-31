@@ -124,12 +124,16 @@ pub(crate) fn parse_probe(output: &str) -> Result<Vec<PortInfo>, String> {
         }
     }
 
-    // Match the local pipeline: one row per (port, protocol, pid).
+    // Match the local pipeline: deduplicate listeners only.
     //
-    // LISTEN sorts first within a group so that dedup keeps it. A process
-    // usually has both a listening socket and established connections on the
-    // same port; if an ESTAB row won, the port would disappear from the default
-    // listening-only view entirely.
+    // Connections are kept distinct. Collapsing them by (port, protocol, pid)
+    // would hide a pile-up of TIME_WAIT or CLOSE_WAIT sockets behind a single
+    // row — and remote doctor counts those rows to find connection leaks, so
+    // deduplicating here would make the leak undetectable over SSH.
+    //
+    // LISTEN sorts first within a group so dedup keeps it: a process usually has
+    // both a listening socket and connections on the same port, and if an ESTAB
+    // row won, the port would vanish from the default listening-only view.
     let listen_first = |p: &PortInfo| u8::from(p.state != TcpState::Listen);
     infos.sort_by(|a, b| {
         a.port
@@ -138,9 +142,32 @@ pub(crate) fn parse_probe(output: &str) -> Result<Vec<PortInfo>, String> {
             .then_with(|| a.pid.cmp(&b.pid))
             .then_with(|| listen_first(a).cmp(&listen_first(b)))
     });
-    infos.dedup_by(|a, b| a.port == b.port && a.protocol == b.protocol && a.pid == b.pid);
+
+    let (mut listeners, connections): (Vec<PortInfo>, Vec<PortInfo>) = infos
+        .into_iter()
+        .partition(|i| i.state == TcpState::Listen || i.protocol.starts_with("UDP"));
+    listeners.dedup_by(|a, b| a.port == b.port && a.protocol == b.protocol && a.pid == b.pid);
+
+    let mut infos = listeners;
+    infos.extend(connections);
+    infos.sort_by(|a, b| a.port.cmp(&b.port).then_with(|| a.pid.cmp(&b.pid)));
 
     Ok(infos)
+}
+
+/// Count TIME_WAIT / CLOSE_WAIT sockets per port from collected remote rows.
+///
+/// The local collectors read these from the raw socket table; over SSH the
+/// probe's rows are the raw table, so counting them directly is equivalent —
+/// but only because connections above are left un-deduplicated.
+pub(crate) fn stale_counts(infos: &[PortInfo]) -> HashMap<(u16, TcpState), u32> {
+    let mut counts = HashMap::new();
+    for i in infos {
+        if matches!(i.state, TcpState::TimeWait | TcpState::CloseWait) {
+            *counts.entry((i.port, i.state)).or_insert(0) += 1;
+        }
+    }
+    counts
 }
 
 /// Keep only listening sockets, mirroring `get_port_infos(filter_listening)`.
@@ -488,10 +515,11 @@ UNCONN 0      0      0.0.0.0:68          0.0.0.0:*    users:((\"dhclient\",pid=5
     }
 
     #[test]
-    fn dedup_keeps_the_listening_row() {
-        // pid 6 has both LISTEN and ESTAB on 3000. They collapse to one row, and
-        // it must be the listener — otherwise the port vanishes from the default
-        // view. Feed ESTAB first to prove order does not decide it.
+    fn listeners_dedup_but_connections_survive() {
+        // pid 6 has both LISTEN and ESTAB on 3000. The listener must appear
+        // exactly once, and the connection must not be folded into it —
+        // collapsing connections is what hid leak pile-ups from remote doctor.
+        // Feed ESTAB first to prove input order does not decide which survives.
         let reordered = SAMPLE.replace(
             "LISTEN 0      511    127.0.0.1:3000      0.0.0.0:*    users:((\"MainThread\",pid=6,fd=21))\nESTAB  0      0      127.0.0.1:3000      127.0.0.1:51234 users:((\"MainThread\",pid=6,fd=24))",
             "ESTAB  0      0      127.0.0.1:3000      127.0.0.1:51234 users:((\"MainThread\",pid=6,fd=24))\nLISTEN 0      511    127.0.0.1:3000      0.0.0.0:*    users:((\"MainThread\",pid=6,fd=21))",
@@ -501,9 +529,38 @@ UNCONN 0      0      0.0.0.0:68          0.0.0.0:*    users:((\"dhclient\",pid=5
         for input in [SAMPLE, reordered.as_str()] {
             let ports = parse_probe(input).unwrap();
             let rows: Vec<_> = ports.iter().filter(|p| p.port == 3000).collect();
-            assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].state, TcpState::Listen);
+            assert_eq!(
+                rows.iter().filter(|p| p.state == TcpState::Listen).count(),
+                1,
+                "listener should appear exactly once"
+            );
+            assert_eq!(
+                rows.iter()
+                    .filter(|p| p.state == TcpState::Established)
+                    .count(),
+                1,
+                "connection must not be collapsed into the listener"
+            );
         }
+    }
+
+    #[test]
+    fn stale_counts_survive_collection() {
+        // Remote doctor counts these rows to find leaks, so a pile-up on one
+        // port has to reach it intact rather than deduplicated to one.
+        let mut input = String::from("#TCP\n");
+        for i in 0..14 {
+            input.push_str(&format!(
+                "CLOSE-WAIT 0 0 127.0.0.1:7000 127.0.0.1:{} users:((\"srv\",pid=5,fd={}))\n",
+                40000 + i,
+                i
+            ));
+        }
+        input.push_str("#UDP\n#PROC\n    5     1 root 1000 60 0 srv\n#EXE\n#END\n");
+
+        let ports = parse_probe(&input).unwrap();
+        let counts = stale_counts(&ports);
+        assert_eq!(counts.get(&(7000, TcpState::CloseWait)), Some(&14));
     }
 
     #[test]

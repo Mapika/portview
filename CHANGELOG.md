@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added
+
+- `portview ssh <host> doctor --agentless` diagnoses a remote host with nothing
+  installed on it. The checks are pure functions over collected data, so the
+  same code runs against remote evidence rather than a second implementation
+  that drifts. Verified to produce output identical to running `portview doctor`
+  on the host itself. The Docker check reports as skipped, since the probe does
+  not query Docker on the far end.
+
 ### Fixed
 
 **Ports whose owner could not be resolved were hidden entirely.** This is the

@@ -29,7 +29,7 @@ impl Severity {
 }
 
 #[derive(Debug, Clone)]
-struct Diagnostic {
+pub(crate) struct Diagnostic {
     severity: Severity,
     check: &'static str,
     title: String,
@@ -38,7 +38,7 @@ struct Diagnostic {
 
 /// Tracks which check categories were run (for rendering pass/skip).
 #[derive(Default)]
-struct CheckResults {
+pub(crate) struct CheckResults {
     port_conflicts: bool,
     wildcard_exposure: bool,
     docker_host_conflicts: bool,
@@ -195,34 +195,82 @@ fn render_diagnostics_json(w: &mut impl Write, diagnostics: &[Diagnostic]) {
 
 // ── Orchestrator ────────────────────────────────────────────────────
 
-/// Run every check and return the findings. Pure — no I/O, no exit — so that
-/// both the CLI renderer and MCP mode can drive it.
-fn collect_diagnostics() -> (Vec<Diagnostic>, CheckResults) {
-    let ports = get_port_infos(false);
-    let docker_map = get_docker_port_map();
-    let docker_available = !docker_map.is_empty();
+/// Everything the checks need, decoupled from where it was gathered.
+///
+/// The local collectors and the agentless SSH probe produce the same shapes, so
+/// a remote host can be diagnosed with the identical checks rather than a second
+/// implementation that drifts.
+pub(crate) struct Evidence {
+    pub ports: Vec<PortInfo>,
+    pub stale_counts: HashMap<(u16, TcpState), u32>,
+    /// `None` when Docker could not be inspected — which is different from an
+    /// empty map, and is why the Docker check reports "skipped" rather than
+    /// "passed" for a remote host.
+    pub docker: Option<DockerPortMap>,
+}
 
+impl Evidence {
+    /// Gather from the machine portview is running on.
+    fn local() -> Self {
+        let docker = get_docker_port_map();
+        Self {
+            ports: get_port_infos(false),
+            stale_counts: get_stale_connection_counts(),
+            docker: if docker.is_empty() {
+                None
+            } else {
+                Some(docker)
+            },
+        }
+    }
+}
+
+/// Run every check against gathered evidence. Pure — no I/O, no exit — so the
+/// CLI renderer, MCP mode, and remote diagnosis can all drive it.
+pub(crate) fn diagnose(evidence: &Evidence) -> (Vec<Diagnostic>, CheckResults) {
     let mut diagnostics = Vec::new();
     let mut results = CheckResults::default();
 
-    diagnostics.extend(check_port_conflicts(&ports));
+    diagnostics.extend(check_port_conflicts(&evidence.ports));
     results.port_conflicts = true;
 
-    diagnostics.extend(check_wildcard_exposure(&ports));
+    diagnostics.extend(check_wildcard_exposure(&evidence.ports));
     results.wildcard_exposure = true;
 
-    if docker_available {
-        diagnostics.extend(check_docker_host_conflicts(&ports, &docker_map));
+    if let Some(docker_map) = &evidence.docker {
+        diagnostics.extend(check_docker_host_conflicts(&evidence.ports, docker_map));
         results.docker_host_conflicts = true;
     }
 
-    diagnostics.extend(check_stale_connections(&get_stale_connection_counts()));
+    diagnostics.extend(check_stale_connections(&evidence.stale_counts));
     results.stale_connections = true;
 
-    diagnostics.extend(check_resource_hogs(&ports));
+    diagnostics.extend(check_resource_hogs(&evidence.ports));
     results.resource_hogs = true;
 
     (diagnostics, results)
+}
+
+fn collect_diagnostics() -> (Vec<Diagnostic>, CheckResults) {
+    diagnose(&Evidence::local())
+}
+
+/// Render a diagnosis. Returns true when anything error-severity was found, so
+/// the caller decides the exit code — a remote diagnosis should not call
+/// `process::exit` from inside a rendering helper.
+pub(crate) fn render(
+    diagnostics: &[Diagnostic],
+    results: &CheckResults,
+    use_color: bool,
+    json: bool,
+) -> bool {
+    let mut out = io::stdout().lock();
+    if json {
+        render_diagnostics_json(&mut out, diagnostics);
+    } else {
+        render_diagnostics(&mut out, diagnostics, results, use_color);
+    }
+    diagnostics.iter().any(|d| d.severity == Severity::Error)
 }
 
 /// Diagnostics as a JSON array string. Used by MCP mode, which cannot let
@@ -237,16 +285,7 @@ pub(crate) fn diagnostics_json_string() -> String {
 
 pub fn run_doctor(use_color: bool, json: bool) {
     let (diagnostics, results) = collect_diagnostics();
-    let has_errors = diagnostics.iter().any(|d| d.severity == Severity::Error);
-
-    let mut out = io::stdout().lock();
-    if json {
-        render_diagnostics_json(&mut out, &diagnostics);
-    } else {
-        render_diagnostics(&mut out, &diagnostics, &results, use_color);
-    }
-
-    if has_errors {
+    if render(&diagnostics, &results, use_color, json) {
         std::process::exit(1);
     }
 }

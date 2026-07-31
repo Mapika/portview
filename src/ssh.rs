@@ -143,15 +143,21 @@ pub(crate) fn run_ssh(
 
     let first_arg = remote_args.first().map(|s| s.as_str());
 
-    // watch and doctor both need portview on the far end: the TUI consumes a
-    // streaming JSON pipe, and doctor's checks run remotely.
-    if agentless && matches!(first_arg, Some("watch") | Some("doctor")) {
+    // watch still needs portview on the far end: the TUI consumes a streaming
+    // JSON pipe. doctor does not — its checks are pure functions over collected
+    // data, so they run locally against what the probe brought back.
+    if agentless && first_arg == Some("watch") {
         eprintln!(
-            "--agentless supports scans only; `{}` needs portview installed on {}.",
-            first_arg.unwrap_or(""),
+            "--agentless does not support `watch`; it needs portview installed on {}.",
             destination
         );
         std::process::exit(1);
+    }
+
+    if agentless && first_arg == Some("doctor") {
+        let json = remote_args.iter().any(|a| a == "--json");
+        run_agentless_doctor(&ssh, use_color, json);
+        return;
     }
 
     match first_arg {
@@ -174,6 +180,33 @@ pub(crate) fn run_ssh(
             }
             run_ssh_scan(&ssh, &args, use_color, agentless);
         }
+    }
+}
+
+/// Diagnose a remote host without portview installed on it.
+///
+/// The probe brings back the same shapes the local collectors produce, so the
+/// identical checks run here rather than a second implementation that drifts.
+fn run_agentless_doctor(ssh: &SshCommand, use_color: bool, json: bool) {
+    let ports = match ssh.run_agentless() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let evidence = crate::doctor::Evidence {
+        stale_counts: crate::agentless::stale_counts(&ports),
+        ports,
+        // The probe does not query Docker on the far end, so the Docker check
+        // is reported as skipped rather than silently passing on no data.
+        docker: None,
+    };
+
+    let (diagnostics, results) = crate::doctor::diagnose(&evidence);
+    if crate::doctor::render(&diagnostics, &results, use_color, json) {
+        std::process::exit(1);
     }
 }
 
