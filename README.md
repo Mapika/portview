@@ -221,9 +221,20 @@ the process, user, memory, uptime, and full command — it resolves
 `/proc/<pid>/exe` on the remote host, so a Node server reads as `node` rather
 than the `MainThread` that `ss` reports.
 
-Agentless mode covers scans, port inspection, and process search. `watch` and
-`doctor` still need portview installed remotely — the TUI consumes a streaming
-JSON pipe, and doctor's checks run on the far end.
+`doctor` works agentless too — the checks are pure functions over collected
+data, so they run locally against whatever the probe brought back:
+
+```bash
+portview ssh user@server doctor --agentless
+```
+
+That produces the same findings as running `portview doctor` on the host
+itself. The Docker check is reported as skipped rather than passed, since the
+probe doesn't query Docker on the far end.
+
+Agentless mode covers scans, port inspection, process search, and diagnostics.
+`watch` still needs portview installed remotely — the TUI consumes a streaming
+JSON pipe.
 
 ### Docker integration
 
@@ -338,7 +349,7 @@ cargo check --target x86_64-pc-windows-msvc
 - **macOS:** Other users' ports are *not* listed without `sudo` — sockets are enumerated per process via `proc_pidfdinfo`, so a process that can't be opened contributes nothing to enumerate. For the same reason doctor cannot detect TIME_WAIT pileups there; CLOSE_WAIT is detected normally.
 - **Windows:** Ports owned by inaccessible system processes are listed with the PID but `-` for name and user. Kill always force-terminates. Run as Administrator for full detail.
 - **Docker:** Requires `docker` CLI and daemon access
-- **SSH:** `watch` and `doctor` require portview on the remote host. Scans fall back to agentless collection (`ss` + `ps`), which needs a Linux remote — macOS and BSD hosts still need portview installed.
+- **SSH:** `watch` requires portview on the remote host. Scans, inspection, search and `doctor` fall back to agentless collection (`ss` + `ps`), which needs a Linux remote — macOS and BSD hosts still need portview installed.
 
 ## License
 
