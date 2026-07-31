@@ -63,8 +63,11 @@ cargo check --target x86_64-pc-windows-msvc
 
 ## Releasing
 
-1. Bump the version in `Cargo.toml` and `flake.nix` (they must match), and add a
-   `CHANGELOG.md` entry.
+1. Bump the version in `Cargo.toml`, `flake.nix`, and `server.json` (both the
+   top-level `version` and `packages[0].version`), and add a `CHANGELOG.md`
+   entry. The release workflow checks all of them against the tag and fails on
+   any mismatch, so a missed file turns into a red release rather than a wrong
+   publish.
 2. Push a full version tag, e.g. `v2.1.0`. That triggers the release workflow:
    cross-platform builds, checksums, a GitHub release, and the Homebrew formula
    update. The tag pattern is `v*.*.*`, so partial tags do not fire it.

@@ -1,13 +1,13 @@
 [package]
 name = "portview"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2024"
 description = "A diagnostic-first port viewer. See what's on your ports, then act on it."
 license = "MIT"
 repository = "https://github.com/mapika/portview"
 keywords = ["port", "process", "diagnostic", "network", "cli"]
 categories = ["command-line-utilities"]
-exclude = ["*.mp4", "aur/", ".github/", "demo/", "action.yml"]
+exclude = ["*.mp4", "aur/", ".github/", "demo/", "action.yml", "server.json"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
