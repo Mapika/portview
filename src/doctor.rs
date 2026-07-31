@@ -1,14 +1,15 @@
+use std::collections::HashMap;
 use std::io::{self, Write};
 
 use crate::docker::{DockerPortMap, get_docker_port_map};
-use crate::{PortInfo, json_escape, write_styled};
+use crate::{PortInfo, TcpState, json_escape, write_styled};
 
 #[cfg(target_os = "linux")]
-use crate::linux::get_port_infos;
+use crate::linux::{get_port_infos, get_stale_connection_counts};
 #[cfg(target_os = "macos")]
-use crate::macos::get_port_infos;
+use crate::macos::{get_port_infos, get_stale_connection_counts};
 #[cfg(target_os = "windows")]
-use crate::windows::get_port_infos;
+use crate::windows::{get_port_infos, get_stale_connection_counts};
 
 // ── Data model ──────────────────────────────────────────────────────
 
@@ -194,7 +195,9 @@ fn render_diagnostics_json(w: &mut impl Write, diagnostics: &[Diagnostic]) {
 
 // ── Orchestrator ────────────────────────────────────────────────────
 
-pub fn run_doctor(use_color: bool, json: bool) {
+/// Run every check and return the findings. Pure — no I/O, no exit — so that
+/// both the CLI renderer and MCP mode can drive it.
+fn collect_diagnostics() -> (Vec<Diagnostic>, CheckResults) {
     let ports = get_port_infos(false);
     let docker_map = get_docker_port_map();
     let docker_available = !docker_map.is_empty();
@@ -213,12 +216,27 @@ pub fn run_doctor(use_color: bool, json: bool) {
         results.docker_host_conflicts = true;
     }
 
-    diagnostics.extend(check_stale_connections(&ports));
+    diagnostics.extend(check_stale_connections(&get_stale_connection_counts()));
     results.stale_connections = true;
 
     diagnostics.extend(check_resource_hogs(&ports));
     results.resource_hogs = true;
 
+    (diagnostics, results)
+}
+
+/// Diagnostics as a JSON array string. Used by MCP mode, which cannot let
+/// `run_doctor` write to stdout (that channel carries JSON-RPC) or exit.
+pub(crate) fn diagnostics_json_string() -> String {
+    let (diagnostics, _) = collect_diagnostics();
+    let mut buf: Vec<u8> = Vec::new();
+    render_diagnostics_json(&mut buf, &diagnostics);
+    // The CLI renderer terminates with a newline; a tool result should not.
+    String::from_utf8_lossy(&buf).trim_end().to_owned()
+}
+
+pub fn run_doctor(use_color: bool, json: bool) {
+    let (diagnostics, results) = collect_diagnostics();
     let has_errors = diagnostics.iter().any(|d| d.severity == Severity::Error);
 
     let mut out = io::stdout().lock();
@@ -377,19 +395,21 @@ fn check_docker_host_conflicts(ports: &[PortInfo], docker_map: &DockerPortMap) -
     diagnostics
 }
 
-fn check_stale_connections(ports: &[PortInfo]) -> Vec<Diagnostic> {
-    use std::collections::HashMap;
-
+/// Takes counts gathered from the raw socket table rather than a `&[PortInfo]`.
+/// `get_port_infos` deduplicates by (port, protocol, pid) and drops sockets with
+/// no owning process, so counting its output yields at most 1 per port and these
+/// thresholds could never trip.
+fn check_stale_connections(counts: &HashMap<(u16, TcpState), u32>) -> Vec<Diagnostic> {
     let mut time_wait_counts: HashMap<u16, u32> = HashMap::new();
     let mut close_wait_counts: HashMap<u16, u32> = HashMap::new();
 
-    for p in ports {
-        match p.state {
-            crate::TcpState::TimeWait => {
-                *time_wait_counts.entry(p.port).or_insert(0) += 1;
+    for (&(port, state), &count) in counts {
+        match state {
+            TcpState::TimeWait => {
+                *time_wait_counts.entry(port).or_insert(0) += count;
             }
-            crate::TcpState::CloseWait => {
-                *close_wait_counts.entry(p.port).or_insert(0) += 1;
+            TcpState::CloseWait => {
+                *close_wait_counts.entry(port).or_insert(0) += count;
             }
             _ => {}
         }
@@ -621,39 +641,19 @@ mod tests {
     }
 
     // ── Task 6: check_stale_connections ──────────────────────────────
+    //
+    // These previously built a Vec<PortInfo> of 51 entries with distinct PIDs
+    // and passed — but the real pipeline can never produce that input, because
+    // get_port_infos deduplicates by (port, protocol, pid) and drops sockets
+    // with no owning process. The check was dead in practice while its tests
+    // were green. The counts now come from the raw socket table, so the tests
+    // below take the same shape the production caller does.
 
     #[test]
-    fn stale_time_wait_flagged() {
-        let addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
-        let ports: Vec<PortInfo> = (0..51)
-            .map(|i| make_port(3000, i + 1, "app", TcpState::TimeWait, addr))
-            .collect();
-        let result = check_stale_connections(&ports);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].severity, Severity::Warning);
-        assert!(result[0].detail.contains("TIME_WAIT"));
-    }
-
-    #[test]
-    fn stale_close_wait_flagged() {
-        let addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
-        let ports: Vec<PortInfo> = (0..11)
-            .map(|i| make_port(5432, i + 1, "app", TcpState::CloseWait, addr))
-            .collect();
-        let result = check_stale_connections(&ports);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].severity, Severity::Warning);
-        assert!(result[0].detail.contains("CLOSE_WAIT"));
-    }
-
-    #[test]
-    fn stale_below_threshold_not_flagged() {
-        let addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
-        let ports: Vec<PortInfo> = (0..10)
-            .map(|i| make_port(3000, i + 1, "app", TcpState::TimeWait, addr))
-            .collect();
-        let result = check_stale_connections(&ports);
-        assert!(result.is_empty());
+    fn stale_severity_is_warning() {
+        let d = check_stale_connections(&counts(&[(3000, TcpState::TimeWait, 51)]));
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].severity, Severity::Warning);
     }
 
     // ── Task 7: check_resource_hogs ──────────────────────────────────
@@ -763,5 +763,65 @@ mod tests {
         assert!(output.contains("\"check\":\"port_conflict\""));
         assert!(output.contains("\"title\":\"test title\""));
         assert!(output.contains("\"detail\":\"test detail\""));
+    }
+
+    fn counts(entries: &[(u16, TcpState, u32)]) -> HashMap<(u16, TcpState), u32> {
+        entries.iter().map(|&(p, s, c)| ((p, s), c)).collect()
+    }
+
+    #[test]
+    fn close_wait_pileup_is_reported() {
+        // The regression this guards: counts used to come from the deduplicated
+        // PortInfo list, where 16 leaked sockets on one port collapsed to 1 and
+        // the threshold could never trip.
+        let d = check_stale_connections(&counts(&[(7000, TcpState::CloseWait, 16)]));
+        assert_eq!(d.len(), 1);
+        assert!(d[0].detail.contains("16 CLOSE_WAIT"), "{}", d[0].detail);
+        assert!(d[0].detail.contains("7000"));
+    }
+
+    #[test]
+    fn time_wait_pileup_is_reported() {
+        let d = check_stale_connections(&counts(&[(8080, TcpState::TimeWait, 51)]));
+        assert_eq!(d.len(), 1);
+        assert!(d[0].detail.contains("51 TIME_WAIT"), "{}", d[0].detail);
+    }
+
+    #[test]
+    fn counts_at_or_below_threshold_are_quiet() {
+        // Thresholds are strictly-greater-than: >10 CLOSE_WAIT, >50 TIME_WAIT.
+        let d = check_stale_connections(&counts(&[
+            (7000, TcpState::CloseWait, 10),
+            (8080, TcpState::TimeWait, 50),
+        ]));
+        assert!(d.is_empty(), "{:?}", d);
+    }
+
+    #[test]
+    fn other_states_are_ignored() {
+        let d = check_stale_connections(&counts(&[
+            (3000, TcpState::Listen, 900),
+            (3001, TcpState::Established, 900),
+        ]));
+        assert!(d.is_empty(), "{:?}", d);
+    }
+
+    #[test]
+    fn each_offending_port_is_reported_once_in_port_order() {
+        let d = check_stale_connections(&counts(&[
+            (9000, TcpState::CloseWait, 12),
+            (7000, TcpState::CloseWait, 20),
+            (8080, TcpState::TimeWait, 60),
+        ]));
+        assert_eq!(d.len(), 3);
+        // TIME_WAIT findings come first, then CLOSE_WAIT, each group by port.
+        assert!(d[0].detail.contains("8080"), "{}", d[0].detail);
+        assert!(d[1].detail.contains("7000"), "{}", d[1].detail);
+        assert!(d[2].detail.contains("9000"), "{}", d[2].detail);
+    }
+
+    #[test]
+    fn no_stale_sockets_means_no_findings() {
+        assert!(check_stale_connections(&HashMap::new()).is_empty());
     }
 }

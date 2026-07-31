@@ -39,7 +39,59 @@ jobs:
         run: sudo apt-get install -y shellcheck
 
       - name: Shellcheck
-        run: shellcheck install.sh
+        run: shellcheck install.sh demo/record.sh demo/stage.sh demo/drive-demo.sh demo/drive-mcp.sh
+
+  # Exercises action.yml against a locally built binary, so the published
+  # action cannot silently break when doctor's output format changes.
+  action:
+    needs: quality
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4be9e76fd7c4901c61fb841f559994984270fce7 # stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+
+      - name: Build portview
+        run: |
+          cargo build --release
+          echo "$PWD/target/release" >> "$GITHUB_PATH"
+
+      # A clean runner should be diagnosable without failing the job.
+      - name: Run the action
+        id: doctor
+        uses: ./
+        with:
+          install: 'false'
+          fail-on: 'never'
+
+      - name: Outputs must be well-formed
+        run: |
+          set -euo pipefail
+          echo "count=${{ steps.doctor.outputs.count }}"
+          echo "errors=${{ steps.doctor.outputs.errors }}"
+          echo "warnings=${{ steps.doctor.outputs.warnings }}"
+          echo '${{ steps.doctor.outputs.findings }}' | jq empty
+          # count must be an integer and equal errors + warnings
+          total=$(( ${{ steps.doctor.outputs.errors }} + ${{ steps.doctor.outputs.warnings }} ))
+          if [ "$total" -ne "${{ steps.doctor.outputs.count }}" ]; then
+            echo "count does not equal errors + warnings"
+            exit 1
+          fi
+
+      - name: A deliberate connection leak must be detected
+        run: |
+          set -euo pipefail
+          # ingest.js leaks 16 CLOSE_WAIT sockets on :7000 — see demo/README.md.
+          node demo/services/ingest.js &
+          sleep 3
+          findings=$(portview doctor --json)
+          echo "$findings" | jq -e '[.[] | select(.check == "stale_connections")] | length > 0' \
+            || { echo "doctor missed a real connection leak"; echo "$findings"; exit 1; }
 
   build:
     needs: quality

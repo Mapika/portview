@@ -261,6 +261,23 @@ fn get_all_sockets() -> Vec<RawSocket> {
     sockets
 }
 
+/// Count TIME_WAIT / CLOSE_WAIT sockets per local port.
+///
+/// Read straight from the socket table, because `get_port_infos` destroys this
+/// information twice over: it drops sockets with no resolvable process (every
+/// TIME_WAIT socket — the owning process is already gone), and it deduplicates
+/// by (port, protocol, pid), collapsing many leaked connections on one port into
+/// a single row. Counting the deduplicated list can never exceed 1 per port.
+pub fn get_stale_connection_counts() -> HashMap<(u16, TcpState), u32> {
+    let mut counts = HashMap::new();
+    for sock in get_all_sockets() {
+        if matches!(sock.state, TcpState::TimeWait | TcpState::CloseWait) {
+            *counts.entry((sock.local_port, sock.state)).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
 // ── Process info helpers ─────────────────────────────────────────────
 
 // FILETIME epoch (1601-01-01) to Unix epoch (1970-01-01) offset in 100ns intervals

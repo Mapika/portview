@@ -21,9 +21,12 @@ mod windows;
 #[cfg(target_os = "windows")]
 use windows::get_port_infos;
 
+mod agentless;
 mod cli;
 mod docker;
 mod doctor;
+mod json;
+mod mcp;
 mod ssh;
 mod tui;
 use cli::{Cli, Command};
@@ -53,7 +56,7 @@ pub(crate) struct PortInfo {
     pub(crate) local_addr: IpAddr,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum TcpState {
     Listen,
     Established,
@@ -1070,7 +1073,7 @@ fn docker_owner_json(owner: &DockerPortOwner) -> String {
     )
 }
 
-fn port_info_json(info: &PortInfo, docker_owners: Option<&[DockerPortOwner]>) -> String {
+pub(crate) fn port_info_json(info: &PortInfo, docker_owners: Option<&[DockerPortOwner]>) -> String {
     let mut json = format!(
         r#"{{"port":{},"protocol":"{}","pid":{},"ppid":{},"process":"{}","command":"{}","user":"{}","state":"{}","memory_bytes":{},"cpu_seconds":{:.1},"children":{},"local_addr":"{}""#,
         info.port,
@@ -1087,6 +1090,18 @@ fn port_info_json(info: &PortInfo, docker_owners: Option<&[DockerPortOwner]>) ->
         info.local_addr,
     );
 
+    // Absolute start time rather than an elapsed value: the consumer may read
+    // this seconds or minutes later (over SSH, or via an MCP client), and an
+    // elapsed figure would be stale by then. `null` when unknown — Docker rows
+    // and processes we could not stat have no start time.
+    match info
+        .start_time
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+    {
+        Some(d) => json.push_str(&format!(r#","start_time_unix":{}"#, d.as_secs())),
+        None => json.push_str(r#","start_time_unix":null"#),
+    }
+
     if let Some(owners) = docker_owners {
         json.push_str(r#","docker":["#);
         for (i, owner) in owners.iter().enumerate() {
@@ -1102,7 +1117,8 @@ fn port_info_json(info: &PortInfo, docker_owners: Option<&[DockerPortOwner]>) ->
     json
 }
 
-fn display_json(infos: &[PortInfo], docker_map: Option<&DockerPortMap>) -> io::Result<()> {
+/// Render ports as a JSON array string (no trailing newline).
+pub(crate) fn ports_json_string(infos: &[PortInfo], docker_map: Option<&DockerPortMap>) -> String {
     let mut json = String::from("[");
     for (i, info) in infos.iter().enumerate() {
         if i > 0 {
@@ -1115,7 +1131,13 @@ fn display_json(infos: &[PortInfo], docker_map: Option<&DockerPortMap>) -> io::R
         });
         json.push_str(&port_info_json(info, docker_owners));
     }
-    json.push_str("]\n");
+    json.push(']');
+    json
+}
+
+fn display_json(infos: &[PortInfo], docker_map: Option<&DockerPortMap>) -> io::Result<()> {
+    let mut json = ports_json_string(infos, docker_map);
+    json.push('\n');
     io::stdout().write_all(json.as_bytes())
 }
 
@@ -1346,14 +1368,19 @@ fn main() {
                 doctor::run_doctor(use_color, *json);
                 return;
             }
+            Command::Mcp { read_only } => {
+                mcp::run_mcp(*read_only);
+                return;
+            }
             Command::Ssh {
                 destination,
                 remote_args,
                 ssh_opt,
+                agentless,
                 no_color,
             } => {
                 let use_color = !no_color && atty_stdout();
-                ssh::run_ssh(destination, remote_args, ssh_opt, use_color);
+                ssh::run_ssh(destination, remote_args, ssh_opt, use_color, *agentless);
                 return;
             }
         }

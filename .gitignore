@@ -1,2 +1,8 @@
 /target
 *.mp4
+
+# Internal design notes and plans — not part of the published project
+docs/
+
+# Tooling scratch
+.playwright-mcp/

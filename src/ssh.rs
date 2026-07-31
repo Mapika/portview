@@ -1,6 +1,8 @@
 use std::net::IpAddr;
 use std::process;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::json::{extract_pairs, parse_f64, parse_string, parse_u64};
 use crate::{PortInfo, TcpState};
 
 // ── SSH command builder ──────────────────────────────────────────────
@@ -28,6 +30,22 @@ impl SshCommand {
         cmd
     }
 
+    /// Run an arbitrary shell snippet on the remote host instead of `portview`.
+    /// Used by agentless mode, where nothing is installed on the far end.
+    pub fn build_shell(&self, script: &str) -> process::Command {
+        let mut cmd = process::Command::new("ssh");
+        cmd.arg("-T");
+        cmd.arg("-o").arg("BatchMode=yes");
+        for opt in &self.ssh_opts {
+            for part in opt.split_whitespace() {
+                cmd.arg(part);
+            }
+        }
+        cmd.arg(&self.destination);
+        cmd.arg(script);
+        cmd
+    }
+
     pub fn run_oneshot(&self, remote_args: &[&str]) -> Result<String, String> {
         let output = self
             .build(remote_args)
@@ -41,11 +59,42 @@ impl SshCommand {
 
         String::from_utf8(output.stdout).map_err(|e| format!("Invalid UTF-8 from remote: {}", e))
     }
+
+    /// Collect ports without portview installed remotely, by shipping a shell
+    /// probe over the same connection.
+    pub fn run_agentless(&self) -> Result<Vec<PortInfo>, String> {
+        let output = self
+            .build_shell(crate::agentless::PROBE)
+            .output()
+            .map_err(|e| format!("Failed to run ssh: {}", e))?;
+
+        // The probe is `|| true`-guarded throughout, so a non-zero status means
+        // the connection itself failed rather than a missing remote tool.
+        if !output.status.success() && output.stdout.is_empty() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(classify_ssh_error(&self.destination, &stderr));
+        }
+
+        let text = String::from_utf8_lossy(&output.stdout);
+        crate::agentless::parse_probe(&text)
+    }
+}
+
+/// Does this SSH failure mean portview simply is not installed on the far end?
+/// That is the case agentless mode exists to handle; anything else (auth, DNS,
+/// refused connections) should surface as a real error.
+///
+/// Shells word this differently and the remote shell is not ours to choose:
+/// bash says "command not found", while dash and ash — `/bin/sh` on Debian and
+/// Alpine, so most containers — say only "not found".
+fn is_missing_remote_portview(stderr_or_msg: &str) -> bool {
+    let s = stderr_or_msg.to_lowercase();
+    s.contains("not found") || s.contains("not installed on") || s.contains("no such file")
 }
 
 fn classify_ssh_error(dest: &str, stderr: &str) -> String {
     let stderr_lower = stderr.to_lowercase();
-    if stderr_lower.contains("command not found") || stderr_lower.contains("no such file") {
+    if is_missing_remote_portview(&stderr_lower) {
         format!(
             "portview is not installed on {}. Install with:\n  ssh {} 'curl -fsSL https://raw.githubusercontent.com/mapika/portview/main/install.sh | sh'",
             dest, dest
@@ -72,13 +121,38 @@ pub(crate) fn run_ssh(
     remote_args: &[String],
     ssh_opts: &[String],
     use_color: bool,
+    agentless: bool,
 ) {
     let ssh = SshCommand {
         destination: destination.to_string(),
         ssh_opts: ssh_opts.to_vec(),
     };
 
+    // `remote_args` is declared with trailing_var_arg so that remote flags
+    // (`watch --sort mem`) pass through untouched. The side effect is that clap
+    // stops parsing our own flags once a positional appears, so
+    // `ssh host 3000 --agentless` lands here instead of in `agentless`. Accept
+    // it from either position and strip it, since forwarding it to the remote
+    // portview would only make the remote reject it.
+    let agentless = agentless || remote_args.iter().any(|a| a == "--agentless");
+    let remote_args: Vec<String> = remote_args
+        .iter()
+        .filter(|a| *a != "--agentless")
+        .cloned()
+        .collect();
+
     let first_arg = remote_args.first().map(|s| s.as_str());
+
+    // watch and doctor both need portview on the far end: the TUI consumes a
+    // streaming JSON pipe, and doctor's checks run remotely.
+    if agentless && matches!(first_arg, Some("watch") | Some("doctor")) {
+        eprintln!(
+            "--agentless supports scans only; `{}` needs portview installed on {}.",
+            first_arg.unwrap_or(""),
+            destination
+        );
+        std::process::exit(1);
+    }
 
     match first_arg {
         Some("watch") => {
@@ -95,10 +169,10 @@ pub(crate) fn run_ssh(
         }
         _ => {
             let mut args = vec!["--json"];
-            for arg in remote_args {
+            for arg in &remote_args {
                 args.push(arg.as_str());
             }
-            run_ssh_scan(&ssh, &args, use_color);
+            run_ssh_scan(&ssh, &args, use_color, agentless);
         }
     }
 }
@@ -135,27 +209,92 @@ fn run_ssh_tui(ssh: &SshCommand, remote_args: &[&str], use_color: bool) {
     }
 }
 
-fn run_ssh_scan(ssh: &SshCommand, remote_args: &[&str], use_color: bool) {
-    match ssh.run_oneshot(remote_args) {
-        Ok(json_output) => match parse_port_json(&json_output) {
-            Ok(ports) => {
-                if ports.is_empty() {
-                    println!("No ports found on remote host.");
-                } else {
-                    let colors = crate::ColorConfig::from_env();
-                    crate::display_port_table(&ports, use_color, &colors);
+fn run_ssh_scan(ssh: &SshCommand, remote_args: &[&str], use_color: bool, agentless: bool) {
+    let show_all = remote_args.iter().any(|a| *a == "--all" || *a == "-a");
+
+    // Anything that is neither a flag nor the injected --json is a filter:
+    // a port number or a process name, same as the local CLI accepts.
+    let target: Option<&str> = remote_args
+        .iter()
+        .find(|a| !a.starts_with('-') && **a != "--json")
+        .copied();
+
+    let ports = if agentless {
+        match ssh.run_agentless() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        match ssh.run_oneshot(remote_args) {
+            Ok(json_output) => match parse_port_json(&json_output) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("Failed to parse remote output: {}", e);
+                    std::process::exit(1);
+                }
+            },
+            // portview is not installed over there — fall back automatically
+            // rather than telling the user to go install it.
+            Err(e) if is_missing_remote_portview(&e) => {
+                eprintln!(
+                    "portview not found on {} — falling back to agentless mode (ss + ps over SSH).",
+                    ssh.destination
+                );
+                match ssh.run_agentless() {
+                    Ok(p) => p,
+                    Err(agentless_err) => {
+                        eprintln!("{}", agentless_err);
+                        std::process::exit(1);
+                    }
                 }
             }
             Err(e) => {
-                eprintln!("Failed to parse remote output: {}", e);
+                eprintln!("{}", e);
                 std::process::exit(1);
             }
-        },
-        Err(e) => {
-            eprintln!("{}", e);
-            std::process::exit(1);
         }
+    };
+
+    // The remote portview applied these itself; the agentless probe returns
+    // everything, so filtering happens here.
+    let ports = if agentless || ports.iter().any(|p| p.state != crate::TcpState::Listen) {
+        let filtered = if show_all {
+            ports
+        } else {
+            crate::agentless::filter_listening(ports)
+        };
+        match target {
+            Some(t) => filter_target(filtered, t),
+            None => filtered,
+        }
+    } else {
+        ports
+    };
+
+    if ports.is_empty() {
+        println!("No ports found on remote host.");
+    } else {
+        let colors = crate::ColorConfig::from_env();
+        crate::display_port_table(&ports, use_color, &colors);
     }
+}
+
+/// Apply a port-number or process-name filter, matching local CLI behaviour.
+fn filter_target(ports: Vec<PortInfo>, target: &str) -> Vec<PortInfo> {
+    if let Ok(port) = target.parse::<u16>() {
+        return ports.into_iter().filter(|p| p.port == port).collect();
+    }
+    let needle = target.to_lowercase();
+    ports
+        .into_iter()
+        .filter(|p| {
+            p.process_name.to_lowercase().contains(&needle)
+                || p.command.to_lowercase().contains(&needle)
+        })
+        .collect()
 }
 
 /// Parse a portview JSON array (as emitted by `--json`) back into `Vec<PortInfo>`.
@@ -263,6 +402,7 @@ fn parse_object(obj: &str) -> Result<PortInfo, String> {
     let mut cpu_seconds: f64 = 0.0;
     let mut children: u32 = 0;
     let mut local_addr: IpAddr = IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
+    let mut start_time: Option<SystemTime> = None;
 
     for (key, value) in &pairs {
         match key.as_str() {
@@ -283,6 +423,14 @@ fn parse_object(obj: &str) -> Result<PortInfo, String> {
                     .parse::<IpAddr>()
                     .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
             }
+            // Absent on portview < 1.7 and `null` when the remote could not
+            // determine it; both mean "unknown", so a parse failure is not an
+            // error here.
+            "start_time_unix" => {
+                start_time = parse_u64(value)
+                    .ok()
+                    .map(|secs| UNIX_EPOCH + Duration::from_secs(secs));
+            }
             // "docker" and any other unknown fields are ignored
             _ => {}
         }
@@ -302,245 +450,10 @@ fn parse_object(obj: &str) -> Result<PortInfo, String> {
         state,
         memory_bytes,
         cpu_seconds,
-        start_time: None,
+        start_time,
         children,
         local_addr,
     })
-}
-
-/// Extract top-level key/value string pairs from the interior of a JSON object.
-/// Values are returned as raw JSON sub-strings (string values include their quotes).
-fn extract_pairs(s: &str) -> Result<Vec<(String, String)>, String> {
-    let mut pairs = Vec::new();
-    let mut pos = 0;
-    let bytes = s.as_bytes();
-
-    while pos < s.len() {
-        // skip whitespace and commas
-        while pos < s.len()
-            && (bytes[pos] == b' '
-                || bytes[pos] == b'\t'
-                || bytes[pos] == b'\n'
-                || bytes[pos] == b'\r'
-                || bytes[pos] == b',')
-        {
-            pos += 1;
-        }
-        if pos >= s.len() {
-            break;
-        }
-
-        // expect '"' for key
-        if bytes[pos] != b'"' {
-            return Err(format!("expected '\"' at position {}", pos));
-        }
-        let (key, after_key) = read_json_string(s, pos)?;
-        pos = after_key;
-
-        // skip whitespace then ':'
-        while pos < s.len() && (bytes[pos] == b' ' || bytes[pos] == b'\t') {
-            pos += 1;
-        }
-        if pos >= s.len() || bytes[pos] != b':' {
-            return Err(format!("expected ':' after key \"{}\"", key));
-        }
-        pos += 1; // skip ':'
-
-        // skip whitespace
-        while pos < s.len() && (bytes[pos] == b' ' || bytes[pos] == b'\t') {
-            pos += 1;
-        }
-        if pos >= s.len() {
-            return Err(format!("expected value for key \"{}\"", key));
-        }
-
-        // read value (string, number, array, or nested object)
-        let (raw_value, after_value) = read_json_value(s, pos)?;
-        pos = after_value;
-
-        pairs.push((key, raw_value));
-    }
-
-    Ok(pairs)
-}
-
-/// Read a JSON string starting at `pos` (which must point at `"`).
-/// Returns (unescaped string content, position after closing `"`).
-fn read_json_string(s: &str, pos: usize) -> Result<(String, usize), String> {
-    debug_assert_eq!(s.as_bytes()[pos], b'"');
-    let mut result = String::new();
-    // Work with char indices so we handle multi-byte UTF-8 correctly.
-    let s_chars: Vec<(usize, char)> = s.char_indices().collect();
-
-    // find the char index corresponding to byte pos+1 (first char inside the string)
-    let start_char_idx = s_chars.partition_point(|(byte_pos, _)| *byte_pos < pos + 1);
-    let mut char_idx = start_char_idx;
-
-    loop {
-        if char_idx >= s_chars.len() {
-            return Err("unterminated string".to_string());
-        }
-        let (byte_pos, c) = s_chars[char_idx];
-        match c {
-            '"' => {
-                // closing quote — return position after it
-                return Ok((result, byte_pos + 1));
-            }
-            '\\' => {
-                char_idx += 1;
-                if char_idx >= s_chars.len() {
-                    return Err("unexpected end after backslash".to_string());
-                }
-                let (_, esc) = s_chars[char_idx];
-                match esc {
-                    '"' => result.push('"'),
-                    '\\' => result.push('\\'),
-                    '/' => result.push('/'),
-                    'n' => result.push('\n'),
-                    'r' => result.push('\r'),
-                    't' => result.push('\t'),
-                    'b' => result.push('\x08'),
-                    'f' => result.push('\x0C'),
-                    'u' => {
-                        // read 4 hex digits
-                        let mut hex = String::new();
-                        for _ in 0..4 {
-                            char_idx += 1;
-                            if char_idx >= s_chars.len() {
-                                return Err("short \\u escape".to_string());
-                            }
-                            hex.push(s_chars[char_idx].1);
-                        }
-                        let code = u32::from_str_radix(&hex, 16)
-                            .map_err(|_| format!("invalid \\u escape: {}", hex))?;
-                        result.push(
-                            char::from_u32(code)
-                                .ok_or_else(|| format!("invalid unicode codepoint: {}", code))?,
-                        );
-                    }
-                    other => {
-                        result.push('\\');
-                        result.push(other);
-                    }
-                }
-            }
-            other => result.push(other),
-        }
-        char_idx += 1;
-    }
-}
-
-/// Read a JSON value (string, number, array, nested object) starting at `pos`.
-/// Returns (raw text, position after the value).
-fn read_json_value(s: &str, pos: usize) -> Result<(String, usize), String> {
-    let bytes = s.as_bytes();
-    match bytes[pos] {
-        b'"' => {
-            // string — find end
-            let end = find_string_end(s, pos)?;
-            Ok((s[pos..end].to_string(), end))
-        }
-        b'[' | b'{' => {
-            // nested structure — use depth tracking
-            let end = find_nested_end(s, pos)?;
-            Ok((s[pos..end].to_string(), end))
-        }
-        _ => {
-            // number, true, false, null — read until ',' or '}' or ']' or whitespace
-            let mut end = pos;
-            while end < s.len()
-                && bytes[end] != b','
-                && bytes[end] != b'}'
-                && bytes[end] != b']'
-                && bytes[end] != b' '
-                && bytes[end] != b'\t'
-                && bytes[end] != b'\n'
-                && bytes[end] != b'\r'
-            {
-                end += 1;
-            }
-            Ok((s[pos..end].to_string(), end))
-        }
-    }
-}
-
-/// Advance past a JSON string starting at `pos` (which points at `"`).
-/// Returns the byte position *after* the closing `"`.
-fn find_string_end(s: &str, pos: usize) -> Result<usize, String> {
-    let bytes = s.as_bytes();
-    let mut i = pos + 1;
-    while i < s.len() {
-        match bytes[i] {
-            b'\\' => i += 2, // skip escaped char
-            b'"' => return Ok(i + 1),
-            _ => i += 1,
-        }
-    }
-    Err("unterminated JSON string".to_string())
-}
-
-/// Advance past a nested `{…}` or `[…]` starting at `pos`.
-/// Returns the byte position *after* the closing brace/bracket.
-fn find_nested_end(s: &str, pos: usize) -> Result<usize, String> {
-    let bytes = s.as_bytes();
-    let mut depth: i32 = 0;
-    let mut in_str = false;
-    let mut i = pos;
-    while i < s.len() {
-        if in_str {
-            match bytes[i] {
-                b'\\' => i += 2,
-                b'"' => {
-                    in_str = false;
-                    i += 1;
-                }
-                _ => i += 1,
-            }
-            continue;
-        }
-        match bytes[i] {
-            b'"' => {
-                in_str = true;
-                i += 1;
-            }
-            b'{' | b'[' => {
-                depth += 1;
-                i += 1;
-            }
-            b'}' | b']' => {
-                depth -= 1;
-                i += 1;
-                if depth == 0 {
-                    return Ok(i);
-                }
-            }
-            _ => i += 1,
-        }
-    }
-    Err("unterminated nested JSON structure".to_string())
-}
-
-fn parse_u64(s: &str) -> Result<u64, String> {
-    s.trim()
-        .parse::<u64>()
-        .map_err(|_| format!("expected integer, got: {}", s))
-}
-
-fn parse_f64(s: &str) -> Result<f64, String> {
-    s.trim()
-        .parse::<f64>()
-        .map_err(|_| format!("expected float, got: {}", s))
-}
-
-/// Parse a JSON string value (raw value includes surrounding quotes).
-fn parse_string(raw: &str) -> Result<String, String> {
-    let raw = raw.trim();
-    if !raw.starts_with('"') {
-        return Err(format!("expected JSON string, got: {}", raw));
-    }
-    // Use the same unescape logic via read_json_string
-    let (s, _) = read_json_string(raw, 0)?;
-    Ok(s)
 }
 
 #[cfg(test)]
@@ -568,6 +481,69 @@ mod tests {
     #[test]
     fn parse_invalid_json() {
         assert!(parse_port_json("not json").is_err());
+    }
+
+    #[test]
+    fn start_time_round_trips() {
+        let json = r#"[{"port":3000,"protocol":"TCP","pid":1234,"ppid":1,"process":"node","command":"next dev","user":"mark","state":"LISTEN","memory_bytes":1000,"cpu_seconds":1.0,"children":0,"local_addr":"0.0.0.0","start_time_unix":1700000000}]"#;
+        let ports = parse_port_json(json).unwrap();
+        let secs = ports[0]
+            .start_time
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(secs, 1_700_000_000);
+    }
+
+    #[test]
+    fn start_time_absent_or_null_means_unknown() {
+        // Absent: a remote running portview < 1.7. Null: the remote had a row
+        // with no start time, e.g. a Docker-synthesised entry.
+        for json in [
+            r#"[{"port":80,"protocol":"TCP","pid":100,"process":"nginx","command":"nginx","user":"root","state":"LISTEN","memory_bytes":1,"cpu_seconds":0.0,"children":0}]"#,
+            r#"[{"port":80,"protocol":"TCP","pid":100,"process":"nginx","command":"nginx","user":"root","state":"LISTEN","memory_bytes":1,"cpu_seconds":0.0,"children":0,"start_time_unix":null}]"#,
+        ] {
+            let ports = parse_port_json(json).expect("must stay parseable");
+            assert!(ports[0].start_time.is_none());
+        }
+    }
+
+    #[test]
+    fn missing_portview_detected_across_shells() {
+        // The remote shell is not ours to choose, and they word this
+        // differently. Missing any of these means the agentless fallback
+        // silently fails to engage.
+        for stderr in [
+            "bash: portview: command not found", // bash
+            "sh: 1: portview: not found",        // dash (Debian /bin/sh)
+            "sh: portview: not found",           // ash (Alpine)
+            "zsh: command not found: portview",  // zsh
+            "-bash: portview: No such file or directory",
+        ] {
+            assert!(
+                is_missing_remote_portview(&stderr.to_lowercase()),
+                "not detected: {}",
+                stderr
+            );
+        }
+    }
+
+    #[test]
+    fn real_connection_errors_do_not_trigger_the_fallback() {
+        // Falling back on these would mask the actual problem.
+        for stderr in [
+            "permission denied (publickey).",
+            "ssh: could not resolve hostname nope",
+            "ssh: connect to host x port 22: connection refused",
+            "host key verification failed.",
+        ] {
+            assert!(
+                !is_missing_remote_portview(&stderr.to_lowercase()),
+                "false positive: {}",
+                stderr
+            );
+        }
     }
 
     #[test]

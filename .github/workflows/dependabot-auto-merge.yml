@@ -1,6 +1,25 @@
 name: Dependabot auto-merge
 
-on: pull_request
+# Triggered after CI finishes rather than when the PR opens.
+#
+# The previous version ran on `pull_request` and called `gh pr merge --auto`,
+# which fails on this repository with:
+#
+#   Protected branch rules not configured for this branch (enablePullRequestAutoMerge)
+#
+# GitHub's auto-merge feature requires a protected branch, and `main` is not
+# protected. Every dependabot PR therefore failed this step and sat open. Since
+# there is no protection to wait on, this waits for CI to pass and then merges
+# directly. (Enabling branch protection on main would be the other fix, and
+# would let the original `--auto` approach work.)
+#
+# `workflow_run` runs from the default branch's copy of this file, so changes
+# here only take effect once merged to main.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
 
 permissions:
   contents: write
@@ -8,17 +27,45 @@ permissions:
 
 jobs:
   auto-merge:
-    if: github.actor == 'dependabot[bot]'
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-    steps:
-      - name: Approve PR
-        run: gh pr review "$PR_URL" --approve
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Enable auto-merge
-        run: gh pr merge "$PR_URL" --auto --merge
+    steps:
+      - name: Merge the dependabot PR
         env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+
+          # The branch prefix is the authorisation check. This job runs with a
+          # writable token, so it must never be able to merge a branch that is
+          # not dependabot's.
+          case "$BRANCH" in
+            dependabot/*) ;;
+            *)
+              echo "$BRANCH is not a dependabot branch; nothing to do."
+              exit 0
+              ;;
+          esac
+
+          number=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open \
+                     --json number --jq '.[0].number // empty')
+          if [ -z "$number" ]; then
+            echo "No open PR for $BRANCH; nothing to do."
+            exit 0
+          fi
+
+          author=$(gh pr view "$number" --repo "$REPO" --json author --jq '.author.login')
+          if [ "$author" != "app/dependabot" ] && [ "$author" != "dependabot[bot]" ]; then
+            echo "PR #$number is authored by $author, not dependabot; refusing."
+            exit 0
+          fi
+
+          echo "Merging #$number ($BRANCH)"
+          # A conflicting PR fails here and stays open for a human, which is the
+          # behaviour we want.
+          gh pr merge "$number" --repo "$REPO" --merge --delete-branch

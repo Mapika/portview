@@ -105,6 +105,12 @@ pub enum Command {
         #[arg(long)]
         no_color: bool,
     },
+    /// Run as an MCP server over stdio (for AI agents)
+    Mcp {
+        /// Withhold the kill_port tool, exposing read-only tools only
+        #[arg(long)]
+        read_only: bool,
+    },
     /// Inspect ports on a remote host via SSH
     Ssh {
         /// SSH destination (user@host or host)
@@ -115,6 +121,9 @@ pub enum Command {
         /// Extra SSH options (e.g. "-p 2222")
         #[arg(long)]
         ssh_opt: Vec<String>,
+        /// Don't use the remote portview; collect via ss/ps over SSH instead
+        #[arg(long)]
+        agentless: bool,
         /// Disable all colors
         #[arg(long)]
         no_color: bool,
