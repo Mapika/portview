@@ -1,6 +1,22 @@
 # Changelog
 
-## Unreleased
+## 2.1.0
+
+Agentless SSH now covers every command, so any host you can reach over SSH can
+be scanned, inspected, diagnosed, and watched without installing anything on
+it. The MCP server gained a change-diff tool, descendant processes, and a dry
+run for the one destructive tool it offers.
+
+**If you script against portview, three outputs changed.** All three are
+corrections of wrong behaviour rather than redefinitions, but a script pinned to
+2.0.x will see different results:
+
+- Ports whose owner cannot be resolved are now listed with `-` instead of being
+  omitted, so a scan can return rows it did not before.
+- `--all` emits one row per connection rather than collapsing them, so a port
+  with sixty `TIME_WAIT` sockets is now sixty rows.
+- `portview ssh <host> --json` emits JSON. It previously either printed a table
+  or failed outright, so nothing could have depended on the old behaviour.
 
 ### Added
 
