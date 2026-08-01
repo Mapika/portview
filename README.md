@@ -232,9 +232,18 @@ That produces the same findings as running `portview doctor` on the host
 itself. The Docker check is reported as skipped rather than passed, since the
 probe doesn't query Docker on the far end.
 
-Agentless mode covers scans, port inspection, process search, and diagnostics.
-`watch` still needs portview installed remotely — the TUI consumes a streaming
-JSON pipe.
+`watch` works agentless as well, including the interactive kill:
+
+```bash
+portview ssh user@server watch --agentless
+```
+
+The probe loops on the far end and the TUI reads the records it sends back, so
+the whole session costs one SSH connection rather than one per refresh.
+
+Agentless mode covers everything: scans, port inspection, process search,
+diagnostics, and watch. On Linux it uses `ss` and `ps`; where `ss` does not
+exist it falls back to `lsof`, which covers macOS and the BSDs.
 
 ### Docker integration
 
@@ -349,7 +358,7 @@ cargo check --target x86_64-pc-windows-msvc
 - **macOS:** Other users' ports are *not* listed without `sudo` — sockets are enumerated per process via `proc_pidfdinfo`, so a process that can't be opened contributes nothing to enumerate. For the same reason doctor cannot detect TIME_WAIT pileups there; CLOSE_WAIT is detected normally.
 - **Windows:** Ports owned by inaccessible system processes are listed with the PID but `-` for name and user. Kill always force-terminates. Run as Administrator for full detail.
 - **Docker:** Requires `docker` CLI and daemon access
-- **SSH:** `watch` requires portview on the remote host. Scans, inspection, search and `doctor` fall back to agentless collection (`ss` + `ps`), which needs a Linux remote — macOS and BSD hosts still need portview installed.
+- **SSH:** every command falls back to agentless collection when portview is missing on the remote, using `ss` + `ps` on Linux and `lsof` where `ss` does not exist. The remote needs one of those and a POSIX shell. Agentless collection cannot see Docker on the far end, so that check reports as skipped rather than passed.
 
 ## License
 
