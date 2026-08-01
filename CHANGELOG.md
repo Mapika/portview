@@ -4,6 +4,13 @@
 
 ### Added
 
+- New MCP tool **`diff_ports`**, which answers "what did that actually change?"
+  The first call records a baseline; the next reports what opened, closed, or
+  changed owner since. A port whose PID changed is reported as *replaced*
+  rather than as a close plus an open, so a restart is distinguishable from a
+  shutdown. Comparing a baseline against a different view (`all` toggled
+  between calls) is refused rather than silently reporting every connection as
+  newly opened.
 - The MCP `kill_port` tool takes `dry_run`, reporting exactly which PIDs would
   be signalled without touching them. The preview resolves its targets through
   the same code the real call uses, so the two cannot disagree — which is the

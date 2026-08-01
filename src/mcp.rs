@@ -12,7 +12,10 @@
 //!   2. **No message may contain a raw newline.** All embedded text is passed
 //!      through `json_escape`, which turns `\n` into `\\n`.
 
+use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
+use std::sync::{LazyLock, Mutex};
+use std::time::Instant;
 
 use crate::doctor::diagnostics_json_string;
 use crate::json::{get, get_bool, get_string, get_u64, object_pairs};
@@ -41,7 +44,10 @@ const SUPPORTED_PROTOCOLS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26",
 const INSTRUCTIONS: &str = "portview exposes the listening ports on this machine and the processes behind them. \
 Use list_ports to see what is running, inspect_port when the user names a specific port, \
 find_process to locate a service by name, and doctor to check for conflicts or services \
-exposed on 0.0.0.0. kill_port terminates processes — confirm with the user before calling it.";
+exposed on 0.0.0.0. diff_ports answers 'what did that change?' — call it once to record a \
+baseline, then again after starting or stopping something. kill_port terminates processes — \
+confirm with the user before calling it, and call it with dry_run=true first if you want to \
+see exactly which PIDs it would signal.";
 
 // ── JSON-RPC error codes ─────────────────────────────────────────────
 
@@ -181,6 +187,7 @@ const SAFE_TOOLS: &[&str] = &[
     r#"{"name":"inspect_port","title":"Inspect a port","description":"Inspect a single port in detail. Returns every process bound to it, including the working directory of each. Use when the user names a specific port, e.g. 'what is on 3000?'.","inputSchema":{"type":"object","properties":{"port":{"type":"integer","description":"Port number (1-65535)."},"docker":{"type":"boolean","description":"Include Docker container attribution. Default false."}},"required":["port"]},"annotations":{"title":"Inspect a port","readOnlyHint":true,"openWorldHint":false}}"#,
     r#"{"name":"find_process","title":"Find ports by process","description":"Find which ports a process is listening on, matching by process name or command substring (case-insensitive). Use for questions like 'what port is postgres on?'. Returns a JSON array.","inputSchema":{"type":"object","properties":{"name":{"type":"string","description":"Process name or command substring, e.g. 'node', 'postgres'."},"all":{"type":"boolean","description":"Include non-listening connections. Default false."}},"required":["name"]},"annotations":{"title":"Find ports by process","readOnlyHint":true,"openWorldHint":false}}"#,
     r#"{"name":"doctor","title":"Diagnose port problems","description":"Run diagnostics: port conflicts between processes, services exposed on 0.0.0.0 that should be localhost-only, Docker/host port collisions, stale TIME_WAIT and CLOSE_WAIT pileups, and unusually high-memory listeners. Returns a JSON array of findings; an empty array means no problems.","inputSchema":{"type":"object","properties":{}},"annotations":{"title":"Diagnose port problems","readOnlyHint":true,"openWorldHint":false}}"#,
+    r#"{"name":"diff_ports","title":"Compare ports against a baseline","description":"Report which ports opened, closed, or changed owner since a baseline. The first call records the baseline and returns no diff; call it again after the change you want to observe. Use this to answer 'what did starting/stopping this actually do to the ports?' without diffing two list_ports results by hand. A port whose PID changed is reported as replaced rather than as a close plus an open, so a restart is distinguishable from a shutdown. Pass reset=true to record a fresh baseline.","inputSchema":{"type":"object","properties":{"all":{"type":"boolean","description":"Track non-listening connections too. Default false. Changing this between calls compares different things."},"reset":{"type":"boolean","description":"Discard the stored baseline and record a new one from the current state. Default false."}}},"annotations":{"title":"Compare ports against a baseline","readOnlyHint":true,"openWorldHint":false}}"#,
 ];
 
 /// Terminates processes. Withheld entirely when `--read-only` is set.
@@ -218,6 +225,7 @@ fn tools_call_result(params: &str, read_only: bool) -> String {
         "inspect_port" => tool_inspect_port(&args),
         "find_process" => tool_find_process(&args),
         "doctor" => tool_text(&diagnostics_json_string()),
+        "diff_ports" => tool_diff_ports(&args),
         "kill_port" => {
             // A dry run is read-only in effect, but the tool stays withheld
             // under --read-only regardless: the guarantee that server offers is
@@ -325,6 +333,136 @@ fn tool_find_process(args: &[(String, String)]) -> String {
         .collect();
 
     tool_text(&ports_json_string(&matches, map.as_ref()))
+}
+
+// ── Port baseline (diff_ports) ───────────────────────────────────────
+
+/// What was listening when the baseline was taken.
+///
+/// Keyed by `(port, protocol)` because that is what a caller means by "the same
+/// port": a service restarting keeps its key and changes its PID, which is the
+/// distinction between *closed and opened* and *replaced*.
+struct Baseline {
+    taken_at: Instant,
+    /// Whether non-listening connections were included. Diffing a snapshot
+    /// taken with a different value would report every connection as newly
+    /// opened, which looks like a real finding and is not one.
+    all: bool,
+    ports: HashMap<(u16, String), (u32, String)>,
+}
+
+type PortMap = HashMap<(u16, String), (u32, String)>;
+
+/// The server is a single long-lived stdio process, so a baseline can simply
+/// live in it. Nothing here touches the machine — this is the server's own
+/// memory of a previous look at it.
+static BASELINE: LazyLock<Mutex<Option<Baseline>>> = LazyLock::new(|| Mutex::new(None));
+
+fn snapshot_ports(all: bool) -> PortMap {
+    get_port_infos(!all)
+        .into_iter()
+        .map(|i| ((i.port, i.protocol.clone()), (i.pid, i.process_name)))
+        .collect()
+}
+
+/// The diff itself, with no I/O and no shared state, so it can be tested.
+///
+/// Returns `(opened, closed, replaced)` as rendered JSON objects, sorted so
+/// repeated calls are comparable — `HashMap` iteration order is not stable.
+fn compute_diff(baseline: &PortMap, current: &PortMap) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut opened = Vec::new();
+    let mut replaced = Vec::new();
+    for ((port, proto), (pid, process)) in current {
+        match baseline.get(&(*port, proto.clone())) {
+            None => opened.push(port_entry_json(*port, proto, *pid, process)),
+            // Same key, different owner: a restart, which is a different event
+            // from a shutdown followed by an unrelated bind.
+            Some((old_pid, old_process)) if old_pid != pid => replaced.push(format!(
+                r#"{{"port":{},"protocol":"{}","before":{{"pid":{},"process":"{}"}},"after":{{"pid":{},"process":"{}"}}}}"#,
+                port,
+                json_escape(proto),
+                old_pid,
+                json_escape(old_process),
+                pid,
+                json_escape(process)
+            )),
+            Some(_) => {}
+        }
+    }
+
+    let mut closed = Vec::new();
+    for ((port, proto), (pid, process)) in baseline {
+        if !current.contains_key(&(*port, proto.clone())) {
+            closed.push(port_entry_json(*port, proto, *pid, process));
+        }
+    }
+
+    opened.sort();
+    closed.sort();
+    replaced.sort();
+    (opened, closed, replaced)
+}
+
+fn port_entry_json(port: u16, protocol: &str, pid: u32, process: &str) -> String {
+    format!(
+        r#"{{"port":{},"protocol":"{}","pid":{},"process":"{}"}}"#,
+        port,
+        json_escape(protocol),
+        pid,
+        json_escape(process)
+    )
+}
+
+fn tool_diff_ports(args: &[(String, String)]) -> String {
+    let all = get_bool(args, "all").unwrap_or(false);
+    let reset = get_bool(args, "reset").unwrap_or(false);
+    let current = snapshot_ports(all);
+
+    let mut guard = match BASELINE.lock() {
+        Ok(g) => g,
+        // Only reachable if a previous call panicked mid-update. Recovering is
+        // better than propagating: the baseline is a convenience, not state the
+        // caller cannot rebuild.
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    let take_baseline = reset || guard.is_none();
+    if take_baseline {
+        let count = current.len();
+        *guard = Some(Baseline {
+            taken_at: Instant::now(),
+            all,
+            ports: current,
+        });
+        return tool_text(&format!(
+            r#"{{"baseline_taken":true,"port_count":{},"note":"Baseline recorded. Call diff_ports again after the change you want to observe."}}"#,
+            count
+        ));
+    }
+
+    let baseline = guard.as_ref().expect("baseline present");
+
+    // Refuse rather than diff two different views: every connection would show
+    // up as newly opened, which reads as a real finding and is an artefact.
+    if baseline.all != all {
+        return tool_error(&format!(
+            "baseline was recorded with all={}, but this call passed all={}. \
+             Comparing them would report unrelated rows as opened or closed. \
+             Call diff_ports with all={} to match, or reset=true to record a new baseline.",
+            baseline.all, all, baseline.all
+        ));
+    }
+
+    let age = baseline.taken_at.elapsed().as_secs();
+    let (opened, closed, replaced) = compute_diff(&baseline.ports, &current);
+
+    tool_text(&format!(
+        r#"{{"baseline_age_seconds":{},"opened":[{}],"closed":[{}],"replaced":[{}]}}"#,
+        age,
+        opened.join(","),
+        closed.join(","),
+        replaced.join(",")
+    ))
 }
 
 /// Resolve which processes a kill on this port would signal.
@@ -494,6 +632,93 @@ mod tests {
         let r = tools_call_result(r#"{"name":"kill_port","arguments":{"port":3000}}"#, true);
         assert!(r.contains(r#""isError":true"#), "{}", r);
         assert!(r.contains("read-only"), "{}", r);
+    }
+
+    // ── diff_ports ───────────────────────────────────────────────────
+
+    fn snap(entries: &[(u16, &str, u32, &str)]) -> PortMap {
+        entries
+            .iter()
+            .map(|(port, proto, pid, name)| ((*port, proto.to_string()), (*pid, name.to_string())))
+            .collect()
+    }
+
+    #[test]
+    fn a_restart_is_replaced_not_a_close_plus_an_open() {
+        // The distinction the whole tool exists for: a service that came back
+        // on the same port is a different event from one that went away.
+        let before = snap(&[(3000, "TCP", 6, "node")]);
+        let after = snap(&[(3000, "TCP", 45, "node")]);
+        let (opened, closed, replaced) = compute_diff(&before, &after);
+
+        assert!(opened.is_empty(), "{:?}", opened);
+        assert!(closed.is_empty(), "{:?}", closed);
+        assert_eq!(replaced.len(), 1, "{:?}", replaced);
+        assert!(
+            replaced[0].contains(r#""before":{"pid":6"#),
+            "{}",
+            replaced[0]
+        );
+        assert!(
+            replaced[0].contains(r#""after":{"pid":45"#),
+            "{}",
+            replaced[0]
+        );
+    }
+
+    #[test]
+    fn opened_and_closed_are_reported_separately() {
+        let before = snap(&[(3000, "TCP", 6, "node"), (5432, "TCP", 9, "postgres")]);
+        let after = snap(&[(3000, "TCP", 6, "node"), (8080, "TCP", 20, "api")]);
+        let (opened, closed, replaced) = compute_diff(&before, &after);
+
+        assert_eq!(opened.len(), 1, "{:?}", opened);
+        assert!(opened[0].contains(r#""port":8080"#));
+        assert_eq!(closed.len(), 1, "{:?}", closed);
+        assert!(closed[0].contains(r#""port":5432"#));
+        assert!(replaced.is_empty(), "{:?}", replaced);
+    }
+
+    #[test]
+    fn the_same_port_on_two_protocols_is_two_entries() {
+        // Keyed by (port, protocol): a service dropping its IPv6 listener while
+        // keeping IPv4 is a real change, not a no-op.
+        let before = snap(&[(3000, "TCP", 6, "node"), (3000, "UDP", 6, "node")]);
+        let after = snap(&[(3000, "TCP", 6, "node")]);
+        let (opened, closed, _) = compute_diff(&before, &after);
+
+        assert!(opened.is_empty(), "{:?}", opened);
+        assert_eq!(closed.len(), 1, "{:?}", closed);
+        assert!(closed[0].contains(r#""protocol":"UDP""#), "{}", closed[0]);
+    }
+
+    #[test]
+    fn an_unchanged_machine_diffs_to_nothing() {
+        let s = snap(&[(3000, "TCP", 6, "node"), (5432, "TCP", 9, "postgres")]);
+        let (opened, closed, replaced) = compute_diff(&s, &s);
+        assert!(opened.is_empty() && closed.is_empty() && replaced.is_empty());
+    }
+
+    #[test]
+    fn diff_output_is_ordered_so_repeated_calls_are_comparable() {
+        // HashMap iteration order is not stable; unsorted output would appear
+        // to change between identical calls.
+        let before = snap(&[]);
+        let after = snap(&[
+            (9000, "TCP", 3, "c"),
+            (3000, "TCP", 1, "a"),
+            (5000, "TCP", 2, "b"),
+        ]);
+        let (first, _, _) = compute_diff(&before, &after);
+        let (second, _, _) = compute_diff(&before, &after);
+        assert_eq!(first, second);
+        assert!(first[0].contains(r#""port":3000"#), "{:?}", first);
+    }
+
+    #[test]
+    fn diff_ports_is_offered_by_a_read_only_server() {
+        // It only reads the machine; the baseline is the server's own memory.
+        assert!(tools_list_result(true).contains(r#""name":"diff_ports""#));
     }
 
     #[test]
