@@ -1022,6 +1022,25 @@ pub(crate) fn kill_process(pid: u32, force: bool) -> io::Result<&'static str> {
     }
 }
 
+/// What `kill_process` would do, without doing it.
+///
+/// This has to agree with `kill_process` on every platform, or a preview is
+/// worse than none. Windows is the case that makes it non-obvious: there is no
+/// signal equivalent, so `force` is ignored and the call always terminates
+/// hard. Reporting "SIGTERM" there would promise a graceful shutdown that
+/// cannot happen.
+pub(crate) fn planned_kill_action(force: bool) -> &'static str {
+    #[cfg(windows)]
+    {
+        let _ = force;
+        "TerminateProcess"
+    }
+    #[cfg(not(windows))]
+    {
+        if force { "SIGKILL" } else { "SIGTERM" }
+    }
+}
+
 #[cfg(windows)]
 pub(crate) fn kill_process(pid: u32, _force: bool) -> io::Result<&'static str> {
     use windows_sys::Win32::Foundation::CloseHandle;
