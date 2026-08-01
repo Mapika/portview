@@ -19,6 +19,17 @@
   `etime`/`time` spellings, which are clock-formatted rather than plain seconds.
   Without that, every lsof-collected port would have come back with no user,
   memory, or command at all.
+- `portview ssh <host> watch --agentless` watches a host with nothing installed
+  on it, interactive kill included. The probe loops on the far end and the TUI
+  reads the records it emits, so a session costs one SSH connection rather than
+  one per refresh — verified as a single invocation across a whole run. Killing
+  signals the PID directly, since `portview kill` is exactly what is missing
+  there.
+
+  With this, agentless mode covers every command. A remote session that ends —
+  a dropped connection, or a host with no collector on it — now reports why on
+  stderr after the terminal is restored, rather than as a status line that the
+  alternate screen takes away with it.
 
 ### Fixed
 

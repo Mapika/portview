@@ -250,6 +250,9 @@ pub struct App {
     tree_mode: bool,
     remote_host: Option<String>,
     ssh_opts: Vec<String>,
+    /// Remote session with no portview on the far end, so actions that would
+    /// shell out to `portview` there have to be expressed some other way.
+    agentless: bool,
 }
 
 impl App {
@@ -292,6 +295,7 @@ impl App {
             tree_mode: false,
             remote_host: None,
             ssh_opts: Vec::new(),
+            agentless: false,
         };
         app.refresh_data();
         if !app.display_ports().is_empty() {
@@ -1362,14 +1366,21 @@ fn handle_kill_popup_key(app: &mut App, code: KeyCode) {
                         destination: host.clone(),
                         ssh_opts: app.ssh_opts.clone(),
                     };
-                    let port_str = popup.port.to_string();
-                    let args: Vec<&str> = if popup.force {
-                        vec!["kill", &port_str, "--force"]
+                    let result = if app.agentless {
+                        // `portview kill` is precisely what is not installed on
+                        // the far end, so signal the PID the probe reported.
+                        ssh.kill_remote_pid(popup.pid, popup.force)
                     } else {
-                        vec!["kill", &port_str]
+                        let port_str = popup.port.to_string();
+                        let args: Vec<&str> = if popup.force {
+                            vec!["kill", &port_str, "--force"]
+                        } else {
+                            vec!["kill", &port_str]
+                        };
+                        ssh.run_oneshot(&args).map(|_| ())
                     };
-                    match ssh.run_oneshot(&args) {
-                        Ok(_) => {
+                    match result {
+                        Ok(()) => {
                             app.status_message = Some((
                                 format!("Killed remote port {}", popup.port),
                                 Instant::now(),
@@ -1511,14 +1522,76 @@ pub fn run_tui(
 
 // ── Remote TUI (SSH pipe mode) ───────────────────────────────────────
 
+/// How a remote session delivers snapshots.
+///
+/// The two differ in framing, not in content: a remote portview emits one JSON
+/// array per line, while the agentless probe emits a multi-line record ending
+/// in `#END`. Reading is the only part of the TUI that needs to know which.
+pub enum RemoteFeed {
+    /// `portview watch --json` on the far end.
+    Json,
+    /// The agentless probe looping over one connection.
+    Probe { show_all: bool },
+}
+
+/// Read the next snapshot from a remote feed.
+///
+/// `Ok(None)` is a clean end of stream. `Err` is a remote-side problem worth
+/// showing the user, such as a host with no collector on it at all.
+fn read_remote_snapshot(
+    reader: &mut impl std::io::BufRead,
+    feed: &RemoteFeed,
+    buf: &mut String,
+) -> Result<Option<Vec<PortInfo>>, String> {
+    match feed {
+        RemoteFeed::Json => {
+            buf.clear();
+            match reader.read_line(buf) {
+                Ok(0) => Ok(None),
+                Ok(_) => Ok(crate::ssh::parse_port_json(buf.trim()).ok()),
+                Err(e) => Err(e.to_string()),
+            }
+        }
+        RemoteFeed::Probe { show_all } => {
+            let mut record = String::new();
+            loop {
+                buf.clear();
+                match reader.read_line(buf) {
+                    // The probe exits without a closing marker when the host has
+                    // no collector, so a partial record here is that message
+                    // rather than an ordinary disconnect.
+                    Ok(0) => {
+                        return match crate::agentless::parse_probe(&record) {
+                            Err(e) if !record.trim().is_empty() => Err(e),
+                            _ => Ok(None),
+                        };
+                    }
+                    Ok(_) => {
+                        record.push_str(buf);
+                        if buf.trim_end() == crate::agentless::RECORD_END {
+                            let ports = crate::agentless::parse_probe(&record)?;
+                            let ports = if *show_all {
+                                ports
+                            } else {
+                                crate::agentless::filter_listening(ports)
+                            };
+                            return Ok(Some(ports));
+                        }
+                    }
+                    Err(e) => return Err(e.to_string()),
+                }
+            }
+        }
+    }
+}
+
 pub fn run_remote_tui(
     host: &str,
     ssh_opts: Vec<String>,
     mut child: std::process::Child,
     no_color: bool,
+    feed: RemoteFeed,
 ) -> io::Result<()> {
-    use std::io::BufRead;
-
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
@@ -1538,13 +1611,15 @@ pub fn run_remote_tui(
         StyleConfig::btop_default()
     };
 
+    let agentless = matches!(feed, RemoteFeed::Probe { .. });
     let mut app = App {
         ports: Vec::new(),
         docker_enabled: false,
         docker_map: DockerPortMap::default(),
         table_state: TableState::default(),
         mode: AppMode::Table,
-        show_all: false,
+        // The producer decides what is in `ports`; this only labels the view.
+        show_all: matches!(feed, RemoteFeed::Probe { show_all: true }),
         filter_text: String::new(),
         popup: None,
         target: None,
@@ -1561,6 +1636,7 @@ pub fn run_remote_tui(
         tree_mode: false,
         remote_host: Some(host.to_string()),
         ssh_opts,
+        agentless,
     };
 
     let child_stdout = child.stdout.take().expect("piped stdout");
@@ -1568,6 +1644,7 @@ pub fn run_remote_tui(
     let mut line_buf = String::new();
 
     let tick_rate = Duration::from_millis(100);
+    let mut fatal: Option<String> = None;
 
     loop {
         terminal.draw(|frame| render(frame, &mut app))?;
@@ -1578,32 +1655,32 @@ pub fn run_remote_tui(
 
         // Try to read data from SSH pipe when due
         if app.last_refresh.elapsed() >= Duration::from_secs(1) {
-            line_buf.clear();
-            match reader.read_line(&mut line_buf) {
-                Ok(0) => {
-                    // EOF
-                    app.status_message = Some(("Connection lost".to_string(), Instant::now()));
+            match read_remote_snapshot(&mut reader, &feed, &mut line_buf) {
+                Ok(Some(ports)) => {
+                    app.ports = ports;
+                    app.last_refresh = Instant::now();
+                    let count = app.display_ports().len();
+                    if count == 0 {
+                        app.table_state.select(None);
+                    } else if let Some(sel) = app.table_state.selected() {
+                        if sel >= count {
+                            app.table_state.select(Some(count - 1));
+                        }
+                    } else {
+                        app.table_state.select(Some(0));
+                    }
+                }
+                // A stream that ends is fatal, and the TUI is about to be torn
+                // down — a status message would render for a single frame and
+                // vanish with the alternate screen, so it is reported on stderr
+                // after the terminal is restored instead.
+                Ok(None) => {
+                    fatal = Some(format!("Connection to {} lost.", host));
                     app.should_quit = true;
                     continue;
                 }
-                Ok(_) => {
-                    if let Ok(ports) = crate::ssh::parse_port_json(line_buf.trim()) {
-                        app.ports = ports;
-                        app.last_refresh = Instant::now();
-                        let count = app.display_ports().len();
-                        if count == 0 {
-                            app.table_state.select(None);
-                        } else if let Some(sel) = app.table_state.selected() {
-                            if sel >= count {
-                                app.table_state.select(Some(count - 1));
-                            }
-                        } else {
-                            app.table_state.select(Some(0));
-                        }
-                    }
-                }
-                Err(_) => {
-                    app.status_message = Some(("Read error".to_string(), Instant::now()));
+                Err(e) => {
+                    fatal = Some(e);
                     app.should_quit = true;
                     continue;
                 }
@@ -1626,6 +1703,10 @@ pub fn run_remote_tui(
     disable_raw_mode()?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
     terminal.show_cursor()?;
+
+    if let Some(message) = fatal {
+        return Err(io::Error::other(message));
+    }
 
     Ok(())
 }
@@ -1680,7 +1761,91 @@ mod tests {
             tree_mode: false,
             remote_host: None,
             ssh_opts: Vec::new(),
+            agentless: false,
         }
+    }
+
+    // ── Remote feed framing ──────────────────────────────────────────
+
+    const PROBE_RECORD: &str = "\
+#TCP
+LISTEN 0 511 127.0.0.1:3000 0.0.0.0:* users:((\"node\",pid=6,fd=21))
+ESTAB  0 0   127.0.0.1:3000 127.0.0.1:51234 users:((\"node\",pid=6,fd=24))
+#UDP
+#PROC
+    6     1 root 45552 120 4 node /opt/app/web.js
+#EXE
+6\t/usr/bin/node
+#END
+";
+
+    #[test]
+    fn probe_feed_reads_one_record_per_end_marker() {
+        // Two records back to back: the reader must stop at the first `#END`
+        // rather than swallowing the stream.
+        let stream = format!("{PROBE_RECORD}{PROBE_RECORD}");
+        let mut reader = std::io::Cursor::new(stream.into_bytes());
+        let feed = RemoteFeed::Probe { show_all: false };
+        let mut buf = String::new();
+
+        for _ in 0..2 {
+            let ports = read_remote_snapshot(&mut reader, &feed, &mut buf)
+                .expect("record parses")
+                .expect("record present");
+            assert_eq!(ports.len(), 1, "{:#?}", ports);
+            assert_eq!(ports[0].port, 3000);
+        }
+
+        // Third read hits the end of the stream cleanly.
+        assert!(
+            read_remote_snapshot(&mut reader, &feed, &mut buf)
+                .expect("clean end of stream")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn probe_feed_honours_show_all() {
+        let mut reader = std::io::Cursor::new(PROBE_RECORD.as_bytes().to_vec());
+        let mut buf = String::new();
+        let ports =
+            read_remote_snapshot(&mut reader, &RemoteFeed::Probe { show_all: true }, &mut buf)
+                .unwrap()
+                .unwrap();
+        // The listener and the established connection, where the default view
+        // keeps only the listener.
+        assert_eq!(ports.len(), 2, "{:#?}", ports);
+    }
+
+    #[test]
+    fn probe_feed_surfaces_a_host_with_no_collector() {
+        // The probe exits without a closing marker in this case, so a partial
+        // record at end of stream is a message rather than a disconnect.
+        let mut reader = std::io::Cursor::new(b"#NOSS\n".to_vec());
+        let mut buf = String::new();
+        let err = read_remote_snapshot(
+            &mut reader,
+            &RemoteFeed::Probe { show_all: false },
+            &mut buf,
+        )
+        .expect_err("must report why the stream ended");
+        assert!(err.contains("lsof"), "unhelpful message: {err}");
+    }
+
+    #[test]
+    fn json_feed_reads_one_array_per_line() {
+        let line = b"[{\"port\":3000,\"protocol\":\"TCP\",\"pid\":6,\"process\":\"node\",\"command\":\"node\",\"user\":\"root\",\"state\":\"LISTEN\",\"memory_bytes\":1,\"cpu_seconds\":0.0,\"children\":0}]\n";
+        let mut reader = std::io::Cursor::new(line.to_vec());
+        let mut buf = String::new();
+        let ports = read_remote_snapshot(&mut reader, &RemoteFeed::Json, &mut buf)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ports[0].port, 3000);
+        assert!(
+            read_remote_snapshot(&mut reader, &RemoteFeed::Json, &mut buf)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

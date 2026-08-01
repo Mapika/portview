@@ -78,6 +78,45 @@ impl SshCommand {
         let text = String::from_utf8_lossy(&output.stdout);
         crate::agentless::parse_probe(&text)
     }
+
+    /// Start a long-lived agentless collection stream for `watch`.
+    ///
+    /// The probe loops on the far end and this side reads the records it emits,
+    /// so the session costs one SSH handshake rather than one per tick.
+    pub fn spawn_agentless_stream(&self, interval_secs: u64) -> Result<process::Child, String> {
+        let mut cmd = self.build_shell(&crate::agentless::probe_loop(interval_secs));
+        cmd.stdout(process::Stdio::piped());
+        cmd.stderr(process::Stdio::piped());
+        cmd.spawn()
+            .map_err(|e| format!("Failed to start SSH: {}", e))
+    }
+
+    /// Terminate a remote process without portview on the far end.
+    ///
+    /// The installed-portview path shells out to `portview kill`, which is
+    /// exactly what is missing here, so this sends a signal directly. The PID is
+    /// a `u32` from the probe's own output, so it cannot carry shell syntax.
+    pub fn kill_remote_pid(&self, pid: u32, force: bool) -> Result<(), String> {
+        let signal = if force { "KILL" } else { "TERM" };
+        let output = self
+            .build_shell(&format!("kill -{} {}", signal, pid))
+            .output()
+            .map_err(|e| format!("Failed to run ssh: {}", e))?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.lines().next().unwrap_or("").trim();
+        if detail.is_empty() {
+            Err(format!(
+                "kill -{} {} failed on the remote host",
+                signal, pid
+            ))
+        } else {
+            Err(detail.to_string())
+        }
+    }
 }
 
 /// Does this SSH failure mean portview simply is not installed on the far end?
@@ -143,15 +182,10 @@ pub(crate) fn run_ssh(
 
     let first_arg = remote_args.first().map(|s| s.as_str());
 
-    // watch still needs portview on the far end: the TUI consumes a streaming
-    // JSON pipe. doctor does not — its checks are pure functions over collected
-    // data, so they run locally against what the probe brought back.
     if agentless && first_arg == Some("watch") {
-        eprintln!(
-            "--agentless does not support `watch`; it needs portview installed on {}.",
-            destination
-        );
-        std::process::exit(1);
+        let show_all = remote_args.iter().any(|a| a == "--all" || a == "-a");
+        run_agentless_tui(&ssh, use_color, show_all);
+        return;
     }
 
     if agentless && first_arg == Some("doctor") {
@@ -247,11 +281,46 @@ fn run_ssh_tui(ssh: &SshCommand, remote_args: &[&str], use_color: bool) {
         }
     };
 
-    let no_color = !use_color;
-    if let Err(e) =
-        crate::tui::run_remote_tui(&ssh.destination, ssh.ssh_opts.clone(), child, no_color)
-    {
-        eprintln!("TUI error: {}", e);
+    start_remote_tui(ssh, child, use_color, crate::tui::RemoteFeed::Json);
+}
+
+/// Watch a host with nothing installed on it.
+///
+/// The probe loops on the far end over a single connection, so this is one SSH
+/// session for the whole run rather than one per tick.
+fn run_agentless_tui(ssh: &SshCommand, use_color: bool, show_all: bool) {
+    let child = match ssh.spawn_agentless_stream(1) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    };
+
+    start_remote_tui(
+        ssh,
+        child,
+        use_color,
+        crate::tui::RemoteFeed::Probe { show_all },
+    );
+}
+
+fn start_remote_tui(
+    ssh: &SshCommand,
+    child: process::Child,
+    use_color: bool,
+    feed: crate::tui::RemoteFeed,
+) {
+    // Reported without a prefix: this carries the reason a remote session
+    // ended, which is a sentence meant for the user, not an internal error.
+    if let Err(e) = crate::tui::run_remote_tui(
+        &ssh.destination,
+        ssh.ssh_opts.clone(),
+        child,
+        !use_color,
+        feed,
+    ) {
+        eprintln!("{}", e);
         std::process::exit(1);
     }
 }

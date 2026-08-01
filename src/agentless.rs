@@ -61,6 +61,26 @@ done
 printf '#%s\n' END
 "#;
 
+/// Terminates one probe record. `watch` reads a stream of these.
+pub(crate) const RECORD_END: &str = "#END";
+
+/// The probe wrapped in a poll loop, for `watch`.
+///
+/// One SSH connection carries the whole session rather than one per tick: an
+/// SSH handshake costs far more than the probe itself, and re-authenticating
+/// every second would be noticed by anything watching auth logs.
+///
+/// No framing has to be invented for this — the probe already terminates each
+/// record with `#END`, so the reader on this side just accumulates until it
+/// sees one. The `exit 0` inside the probe's no-collector branch ends the loop
+/// too, which is what we want: nothing will change by trying again.
+pub(crate) fn probe_loop(interval_secs: u64) -> String {
+    // The marker constraint documented above `PROBE` applies here as well: this
+    // wrapper is part of the command line `ps` reports, so it must not spell a
+    // marker literally either.
+    format!("while :; do{PROBE}sleep {interval_secs}\ndone\n")
+}
+
 /// One row from the remote `ps` table.
 #[derive(Debug, Clone, Default)]
 struct ProcRow {
@@ -843,7 +863,26 @@ MainThread  18 root   39u  IPv4 302431      0t0  TCP 127.0.0.1:7000->127.0.0.1:3
                 "PROBE contains the literal marker {} — print it as '#%s' instead",
                 marker
             );
+            // The watch wrapper is part of the same command line, so it carries
+            // the same constraint.
+            assert!(
+                !probe_loop(1).contains(marker),
+                "probe_loop contains the literal marker {}",
+                marker
+            );
         }
+    }
+
+    #[test]
+    fn probe_loop_repeats_the_probe_and_sleeps() {
+        let script = probe_loop(3);
+        assert!(script.starts_with("while :; do"));
+        assert!(script.contains("sleep 3"));
+        assert!(script.trim_end().ends_with("done"));
+        // The probe itself must survive intact; a mangled copy would still run
+        // and simply return nothing.
+        assert!(script.contains("ss -tanp"));
+        assert!(script.contains("lsof -nP -i"));
     }
 
     #[test]
