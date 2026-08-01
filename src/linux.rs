@@ -220,6 +220,22 @@ fn exe_link_name(path: &std::path::Path) -> Option<String> {
     }
 }
 
+/// Direct children of `pid`, with their names.
+///
+/// Name and PID come back together because Windows gets both from one process
+/// snapshot; splitting them would make that platform pay for a second walk.
+pub fn get_child_processes(pid: u32) -> Vec<(u32, String)> {
+    // The kernel exposes children per *thread*, and the main thread's list is
+    // the process's own. Unreadable for another user's process, which degrades
+    // to an empty list rather than an error — as every other field here does.
+    let raw =
+        fs::read_to_string(format!("/proc/{}/task/{}/children", pid, pid)).unwrap_or_default();
+    raw.split_whitespace()
+        .filter_map(|s| s.parse::<u32>().ok())
+        .map(|child| (child, get_process_name(child)))
+        .collect()
+}
+
 fn get_process_cmdline(pid: u32) -> String {
     let raw = fs::read(format!("/proc/{}/cmdline", pid)).unwrap_or_default();
     let cmd: String = raw
