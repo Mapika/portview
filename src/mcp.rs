@@ -184,7 +184,7 @@ const SAFE_TOOLS: &[&str] = &[
 ];
 
 /// Terminates processes. Withheld entirely when `--read-only` is set.
-const KILL_TOOL: &str = r#"{"name":"kill_port","title":"Kill process on a port","description":"Terminate the process(es) listening on a port. Sends SIGTERM by default, or SIGKILL when force=true (on Windows, always a forced terminate). This is destructive and cannot be undone — confirm with the user first.","inputSchema":{"type":"object","properties":{"port":{"type":"integer","description":"Port number (1-65535)."},"force":{"type":"boolean","description":"Use SIGKILL instead of SIGTERM. Default false."}},"required":["port"]},"annotations":{"title":"Kill process on a port","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}}"#;
+const KILL_TOOL: &str = r#"{"name":"kill_port","title":"Kill process on a port","description":"Terminate the process(es) listening on a port. Sends SIGTERM by default, or SIGKILL when force=true (on Windows, always a forced terminate). This is destructive and cannot be undone — confirm with the user first. Set dry_run=true to see exactly which PIDs would be signalled without touching them; this resolves the same target list the real call uses, so it is the reliable way to check before acting.","inputSchema":{"type":"object","properties":{"port":{"type":"integer","description":"Port number (1-65535)."},"force":{"type":"boolean","description":"Use SIGKILL instead of SIGTERM. Default false."},"dry_run":{"type":"boolean","description":"Report which processes would be signalled and stop. Nothing is terminated. Default false."}},"required":["port"]},"annotations":{"title":"Kill process on a port","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}}"#;
 
 fn tools_list_result(read_only: bool) -> String {
     let mut tools: Vec<&str> = SAFE_TOOLS.to_vec();
@@ -219,6 +219,11 @@ fn tools_call_result(params: &str, read_only: bool) -> String {
         "find_process" => tool_find_process(&args),
         "doctor" => tool_text(&diagnostics_json_string()),
         "kill_port" => {
+            // A dry run is read-only in effect, but the tool stays withheld
+            // under --read-only regardless: the guarantee that server offers is
+            // that nothing destructive is even listed, and a `kill_port` in the
+            // list that refuses half its arguments is a worse contract than an
+            // absent one. `inspect_port` answers what is on the port.
             if read_only {
                 tool_error("kill_port is disabled: this server was started with --read-only")
             } else {
@@ -322,13 +327,12 @@ fn tool_find_process(args: &[(String, String)]) -> String {
     tool_text(&ports_json_string(&matches, map.as_ref()))
 }
 
-fn tool_kill_port(args: &[(String, String)]) -> String {
-    let port = match required_port(args) {
-        Ok(p) => p,
-        Err(e) => return tool_error(&e),
-    };
-    let force = get_bool(args, "force").unwrap_or(false);
-
+/// Resolve which processes a kill on this port would signal.
+///
+/// Shared by the dry run and the real thing deliberately: a preview computed
+/// any other way could disagree with what the kill actually targets, which is
+/// the one bug a preview must not have.
+fn kill_targets(port: u16) -> Vec<(u32, String)> {
     // filter_listening = true: only ever signal an actual listener, never a
     // process that merely holds an ESTABLISHED or TIME_WAIT socket on this port.
     let infos = get_port_infos(true);
@@ -340,9 +344,41 @@ fn tool_kill_port(args: &[(String, String)]) -> String {
     // The same PID appears once per protocol (tcp/tcp6); signal it once.
     targets.sort_by_key(|(pid, _)| *pid);
     targets.dedup_by_key(|(pid, _)| *pid);
+    targets
+}
+
+fn tool_kill_port(args: &[(String, String)]) -> String {
+    let port = match required_port(args) {
+        Ok(p) => p,
+        Err(e) => return tool_error(&e),
+    };
+    let force = get_bool(args, "force").unwrap_or(false);
+    let dry_run = get_bool(args, "dry_run").unwrap_or(false);
+
+    let targets = kill_targets(port);
 
     if targets.is_empty() {
         return tool_error(&format!("nothing is listening on port {}", port));
+    }
+
+    if dry_run {
+        let action = crate::planned_kill_action(force);
+        let would: Vec<String> = targets
+            .iter()
+            .map(|(pid, process)| {
+                format!(
+                    r#"{{"pid":{},"process":"{}","signal":"{}"}}"#,
+                    pid,
+                    json_escape(process),
+                    action
+                )
+            })
+            .collect();
+        return tool_text(&format!(
+            r#"{{"port":{},"dry_run":true,"would_kill":[{}]}}"#,
+            port,
+            would.join(",")
+        ));
     }
 
     let mut killed = Vec::new();
@@ -458,6 +494,52 @@ mod tests {
         let r = tools_call_result(r#"{"name":"kill_port","arguments":{"port":3000}}"#, true);
         assert!(r.contains(r#""isError":true"#), "{}", r);
         assert!(r.contains("read-only"), "{}", r);
+    }
+
+    #[test]
+    fn read_only_refuses_a_dry_run_too() {
+        // A dry run does not terminate anything, but the --read-only server's
+        // contract is that no destructive tool is offered at all.
+        let r = tools_call_result(
+            r#"{"name":"kill_port","arguments":{"port":3000,"dry_run":true}}"#,
+            true,
+        );
+        assert!(r.contains(r#""isError":true"#), "{}", r);
+        assert!(r.contains("read-only"), "{}", r);
+    }
+
+    #[test]
+    fn a_dry_run_reports_the_action_the_real_call_would_take() {
+        // Windows ignores `force` and always terminates hard, so a preview
+        // promising SIGTERM there would be a lie.
+        if cfg!(windows) {
+            assert_eq!(crate::planned_kill_action(false), "TerminateProcess");
+            assert_eq!(crate::planned_kill_action(true), "TerminateProcess");
+        } else {
+            assert_eq!(crate::planned_kill_action(false), "SIGTERM");
+            assert_eq!(crate::planned_kill_action(true), "SIGKILL");
+        }
+    }
+
+    #[test]
+    fn a_dry_run_on_an_unused_port_reports_nothing_to_kill() {
+        // Port 1 is privileged and unbound in any sane test environment, so the
+        // target list is genuinely empty rather than merely unmatched.
+        let r = tools_call_result(
+            r#"{"name":"kill_port","arguments":{"port":1,"dry_run":true}}"#,
+            false,
+        );
+        assert!(r.contains(r#""isError":true"#), "{}", r);
+        assert!(r.contains("nothing is listening"), "{}", r);
+    }
+
+    #[test]
+    fn the_kill_tool_advertises_the_dry_run() {
+        // The description is what the model actually reads; an undiscoverable
+        // preview is no safer than none.
+        let tools = tools_list_result(false);
+        assert!(tools.contains(r#""dry_run""#), "{}", tools);
+        assert!(tools.contains("without touching them"), "{}", tools);
     }
 
     #[test]

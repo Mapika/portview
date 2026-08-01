@@ -4,6 +4,13 @@
 
 ### Added
 
+- The MCP `kill_port` tool takes `dry_run`, reporting exactly which PIDs would
+  be signalled without touching them. The preview resolves its targets through
+  the same code the real call uses, so the two cannot disagree — which is the
+  one bug a preview must not have. It reports the action that would actually be
+  taken, too: Windows has no signal equivalent and always terminates hard, so a
+  dry run there says `TerminateProcess` rather than promising a `SIGTERM` that
+  cannot happen. `kill_port` stays withheld entirely under `--read-only`.
 - `portview ssh <host> doctor --agentless` diagnoses a remote host with nothing
   installed on it. The checks are pure functions over collected data, so the
   same code runs against remote evidence rather than a second implementation
