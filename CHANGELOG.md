@@ -4,6 +4,14 @@
 
 ### Added
 
+- The MCP `inspect_port` tool now returns each process's descendants in
+  `child_processes`, so "what else stops if I stop this?" is answerable — a dev
+  server's workers are its children, not separate port owners. Entries are flat
+  and carry `pid`, `ppid`, `process`, and `depth`, which holds the same
+  information as a nested structure and is simpler to consume. The walk is
+  bounded and reports `child_processes_truncated` rather than silently
+  returning a partial tree. This is distinct from the existing `children`
+  field, which is a count of direct children only.
 - New MCP tool **`diff_ports`**, which answers "what did that actually change?"
   The first call records a baseline; the next reports what opened, closed, or
   changed owner since. A port whose PID changed is reported as *replaced*

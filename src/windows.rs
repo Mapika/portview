@@ -443,6 +443,43 @@ fn build_process_maps() -> (HashMap<u32, u32>, HashMap<u32, u32>) {
     (children_count, ppid_map)
 }
 
+/// Direct children of `pid`, with their names.
+///
+/// Name and PID come back together because the snapshot already carries both in
+/// `szExeFile` — resolving names separately would mean opening a handle per
+/// child, which fails for anything privileged.
+pub fn get_child_processes(pid: u32) -> Vec<(u32, String)> {
+    let mut children = Vec::new();
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return children;
+    }
+
+    let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+
+    if unsafe { Process32FirstW(snapshot, &mut entry) } != 0 {
+        loop {
+            if entry.th32ParentProcessID == pid && entry.th32ProcessID != pid {
+                let len = entry
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
+                children.push((entry.th32ProcessID, name));
+            }
+            if unsafe { Process32NextW(snapshot, &mut entry) } == 0 {
+                break;
+            }
+        }
+    }
+
+    unsafe { CloseHandle(snapshot) };
+    children
+}
+
 // ── Main entry point ─────────────────────────────────────────────────
 
 pub fn get_port_infos(filter_listening: bool) -> Vec<PortInfo> {

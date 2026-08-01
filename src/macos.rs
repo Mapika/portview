@@ -355,6 +355,44 @@ fn count_children(pid: i32) -> u32 {
     count as u32
 }
 
+/// Direct children of `pid`, with their names.
+///
+/// Name and PID come back together because Windows gets both from one process
+/// snapshot; splitting them would make that platform pay for a second walk.
+pub fn get_child_processes(pid: u32) -> Vec<(u32, String)> {
+    let pid = pid as i32;
+    let size = unsafe { proc_listchildpids(pid, std::ptr::null_mut(), 0) };
+    if size <= 0 {
+        return Vec::new();
+    }
+
+    // Ask for a little more than the sizing call reported: children can be
+    // forked between the two calls, and a full buffer would silently truncate.
+    let capacity = size as usize / std::mem::size_of::<i32>() + 8;
+    let mut buf = vec![0i32; capacity];
+    let bytes = unsafe {
+        proc_listchildpids(
+            pid,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            (capacity * std::mem::size_of::<i32>()) as i32,
+        )
+    };
+    if bytes <= 0 {
+        return Vec::new();
+    }
+
+    let written = (bytes as usize / std::mem::size_of::<i32>()).min(capacity);
+    buf.truncate(written);
+    buf.into_iter()
+        .filter(|p| *p > 0)
+        .map(|child| {
+            let path = get_pid_path(child);
+            let name = path.rsplit('/').next().unwrap_or("").to_string();
+            (child as u32, name)
+        })
+        .collect()
+}
+
 pub fn get_process_cwd(_pid: u32) -> String {
     String::new()
 }

@@ -27,11 +27,11 @@ use crate::{
 use crate::docker::{DockerPortMap, get_docker_port_map};
 
 #[cfg(target_os = "linux")]
-use crate::linux::get_port_infos;
+use crate::linux::{get_child_processes, get_port_infos};
 #[cfg(target_os = "macos")]
-use crate::macos::get_port_infos;
+use crate::macos::{get_child_processes, get_port_infos};
 #[cfg(target_os = "windows")]
-use crate::windows::get_port_infos;
+use crate::windows::{get_child_processes, get_port_infos};
 
 /// Newest spec revision we implement.
 const LATEST_PROTOCOL: &str = "2025-11-25";
@@ -184,7 +184,7 @@ fn initialize_result(params: &str) -> String {
 /// Read-only tools, always available.
 const SAFE_TOOLS: &[&str] = &[
     r#"{"name":"list_ports","title":"List ports","description":"List listening ports on this machine with the process, user, uptime, memory, and full command behind each one. Set all=true to include established/non-listening connections, docker=true to attribute ports to Docker containers. Returns a JSON array.","inputSchema":{"type":"object","properties":{"all":{"type":"boolean","description":"Include non-listening connections (ESTABLISHED, TIME_WAIT, ...). Default false."},"docker":{"type":"boolean","description":"Attribute ports to Docker containers and include container-only published ports. Default false."}}},"annotations":{"title":"List ports","readOnlyHint":true,"openWorldHint":false}}"#,
-    r#"{"name":"inspect_port","title":"Inspect a port","description":"Inspect a single port in detail. Returns every process bound to it, including the working directory of each. Use when the user names a specific port, e.g. 'what is on 3000?'.","inputSchema":{"type":"object","properties":{"port":{"type":"integer","description":"Port number (1-65535)."},"docker":{"type":"boolean","description":"Include Docker container attribution. Default false."}},"required":["port"]},"annotations":{"title":"Inspect a port","readOnlyHint":true,"openWorldHint":false}}"#,
+    r#"{"name":"inspect_port","title":"Inspect a port","description":"Inspect a single port in detail. Returns every process bound to it, with the working directory of each and its descendant processes in child_processes (pid, ppid, process, depth — flat, so nest by ppid if you need a tree). Use when the user names a specific port, e.g. 'what is on 3000?', or to see what else would be affected by stopping it: a dev server's workers are its children, not separate port owners. child_processes_truncated is true when the walk hit its limit.","inputSchema":{"type":"object","properties":{"port":{"type":"integer","description":"Port number (1-65535)."},"docker":{"type":"boolean","description":"Include Docker container attribution. Default false."}},"required":["port"]},"annotations":{"title":"Inspect a port","readOnlyHint":true,"openWorldHint":false}}"#,
     r#"{"name":"find_process","title":"Find ports by process","description":"Find which ports a process is listening on, matching by process name or command substring (case-insensitive). Use for questions like 'what port is postgres on?'. Returns a JSON array.","inputSchema":{"type":"object","properties":{"name":{"type":"string","description":"Process name or command substring, e.g. 'node', 'postgres'."},"all":{"type":"boolean","description":"Include non-listening connections. Default false."}},"required":["name"]},"annotations":{"title":"Find ports by process","readOnlyHint":true,"openWorldHint":false}}"#,
     r#"{"name":"doctor","title":"Diagnose port problems","description":"Run diagnostics: port conflicts between processes, services exposed on 0.0.0.0 that should be localhost-only, Docker/host port collisions, stale TIME_WAIT and CLOSE_WAIT pileups, and unusually high-memory listeners. Returns a JSON array of findings; an empty array means no problems.","inputSchema":{"type":"object","properties":{}},"annotations":{"title":"Diagnose port problems","readOnlyHint":true,"openWorldHint":false}}"#,
     r#"{"name":"diff_ports","title":"Compare ports against a baseline","description":"Report which ports opened, closed, or changed owner since a baseline. The first call records the baseline and returns no diff; call it again after the change you want to observe. Use this to answer 'what did starting/stopping this actually do to the ports?' without diffing two list_ports results by hand. A port whose PID changed is reported as replaced rather than as a close plus an open, so a restart is distinguishable from a shutdown. Pass reset=true to record a fresh baseline.","inputSchema":{"type":"object","properties":{"all":{"type":"boolean","description":"Track non-listening connections too. Default false. Changing this between calls compares different things."},"reset":{"type":"boolean","description":"Discard the stored baseline and record a new one from the current state. Default false."}}},"annotations":{"title":"Compare ports against a baseline","readOnlyHint":true,"openWorldHint":false}}"#,
@@ -299,9 +299,14 @@ fn tool_inspect_port(args: &[(String, String)]) -> String {
             .map(|m| m.get(&info.port).map(|o| o.as_slice()).unwrap_or(&[][..]));
         let mut obj = port_info_json(info, owners);
         obj.pop(); // trailing '}'
+        // `children` in the base object is a count; this is the list. Distinct
+        // keys because they answer different questions and both are useful.
+        let (tree, truncated) = descendant_processes(info.pid);
         obj.push_str(&format!(
-            r#","cwd":"{}"}}"#,
-            json_escape(&get_process_cwd(info.pid))
+            r#","cwd":"{}","child_processes":[{}],"child_processes_truncated":{}}}"#,
+            json_escape(&get_process_cwd(info.pid)),
+            tree.join(","),
+            truncated
         ));
         entries.push(obj);
     }
@@ -333,6 +338,71 @@ fn tool_find_process(args: &[(String, String)]) -> String {
         .collect();
 
     tool_text(&ports_json_string(&matches, map.as_ref()))
+}
+
+// ── Process tree (inspect_port) ──────────────────────────────────────
+
+/// Bounds on the descendant walk.
+///
+/// This runs per `inspect_port` call, and a supervisor with hundreds of workers
+/// would otherwise dominate the response. The node cap matters most on Windows,
+/// which pays a process snapshot per node walked.
+const TREE_MAX_DEPTH: usize = 3;
+const TREE_MAX_NODES: usize = 64;
+
+/// Descendants of `root`, breadth-first. Returns `(entries, truncated)`.
+///
+/// Flat rather than nested: every entry carries `ppid` and `depth`, which is
+/// the same information a nested structure holds and is far simpler to emit and
+/// to consume. Breadth-first so that when the cap truncates, what survives is
+/// the shallowest part of the tree — the part the caller is most likely to
+/// care about.
+fn descendant_processes(root: u32) -> (Vec<String>, bool) {
+    walk_descendants(root, get_child_processes)
+}
+
+/// The walk itself, with the child lookup injected so the bounds and the cycle
+/// guard can be tested without a real process tree.
+fn walk_descendants(
+    root: u32,
+    children_of: impl Fn(u32) -> Vec<(u32, String)>,
+) -> (Vec<String>, bool) {
+    use std::collections::{HashSet, VecDeque};
+
+    let mut entries = Vec::new();
+    let mut queue: VecDeque<(u32, usize)> = VecDeque::from([(root, 0usize)]);
+    // Guards against a reparenting race producing a cycle. It costs nothing and
+    // the alternative is an unbounded walk.
+    let mut seen: HashSet<u32> = HashSet::from([root]);
+    let mut truncated = false;
+
+    while let Some((pid, depth)) = queue.pop_front() {
+        if depth >= TREE_MAX_DEPTH {
+            continue;
+        }
+        for (child, name) in children_of(pid) {
+            if !seen.insert(child) {
+                continue;
+            }
+            if entries.len() >= TREE_MAX_NODES {
+                truncated = true;
+                break;
+            }
+            entries.push(format!(
+                r#"{{"pid":{},"ppid":{},"process":"{}","depth":{}}}"#,
+                child,
+                pid,
+                json_escape(&name),
+                depth + 1
+            ));
+            queue.push_back((child, depth + 1));
+        }
+        if truncated {
+            break;
+        }
+    }
+
+    (entries, truncated)
 }
 
 // ── Port baseline (diff_ports) ───────────────────────────────────────
@@ -632,6 +702,74 @@ mod tests {
         let r = tools_call_result(r#"{"name":"kill_port","arguments":{"port":3000}}"#, true);
         assert!(r.contains(r#""isError":true"#), "{}", r);
         assert!(r.contains("read-only"), "{}", r);
+    }
+
+    // ── process tree ─────────────────────────────────────────────────
+
+    /// A child lookup over a fixed `parent -> children` table.
+    fn tree_of<'a>(edges: &'a [(u32, &'a [u32])]) -> impl Fn(u32) -> Vec<(u32, String)> + 'a {
+        move |pid| {
+            edges
+                .iter()
+                .find(|(parent, _)| *parent == pid)
+                .map(|(_, kids)| {
+                    kids.iter()
+                        .map(|k| (*k, format!("proc{}", k)))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        }
+    }
+
+    #[test]
+    fn descendants_are_reported_with_their_parent_and_depth() {
+        let (entries, truncated) =
+            walk_descendants(1, tree_of(&[(1, &[2, 3]), (2, &[4]), (4, &[5])]));
+        assert!(!truncated);
+        assert_eq!(entries.len(), 4, "{:#?}", entries);
+        assert!(entries[0].contains(r#""pid":2,"ppid":1"#), "{}", entries[0]);
+        assert!(entries[0].contains(r#""depth":1"#), "{}", entries[0]);
+        // Breadth-first: both depth-1 nodes precede the depth-2 node.
+        assert!(entries[1].contains(r#""depth":1"#), "{}", entries[1]);
+        assert!(entries[2].contains(r#""pid":4,"ppid":2"#), "{}", entries[2]);
+        assert!(entries[2].contains(r#""depth":2"#), "{}", entries[2]);
+    }
+
+    #[test]
+    fn the_walk_stops_at_the_depth_limit() {
+        // A chain longer than TREE_MAX_DEPTH: only the first three levels below
+        // the root are reported.
+        let (entries, truncated) = walk_descendants(
+            1,
+            tree_of(&[(1, &[2]), (2, &[3]), (3, &[4]), (4, &[5]), (5, &[6])]),
+        );
+        assert!(!truncated, "a depth stop is not a node-cap truncation");
+        assert_eq!(entries.len(), TREE_MAX_DEPTH, "{:#?}", entries);
+        assert!(entries.last().unwrap().contains(r#""pid":4"#));
+    }
+
+    #[test]
+    fn the_walk_reports_when_the_node_cap_truncates() {
+        // One parent with more children than the cap allows.
+        let many: Vec<u32> = (2..200).collect();
+        let (entries, truncated) = walk_descendants(1, tree_of(&[(1, &many)]));
+        assert!(truncated, "hitting the cap must be reported, not hidden");
+        assert_eq!(entries.len(), TREE_MAX_NODES);
+    }
+
+    #[test]
+    fn a_parent_cycle_does_not_loop_forever() {
+        // Reparenting races can in principle produce this; the walk must end.
+        let (entries, _) = walk_descendants(1, tree_of(&[(1, &[2]), (2, &[1])]));
+        assert_eq!(entries.len(), 1, "{:#?}", entries);
+        assert!(entries[0].contains(r#""pid":2"#));
+    }
+
+    #[test]
+    fn a_process_with_no_children_yields_nothing() {
+        let (entries, truncated) = walk_descendants(1, tree_of(&[]));
+        assert!(entries.is_empty());
+        assert!(!truncated);
     }
 
     // ── diff_ports ───────────────────────────────────────────────────
