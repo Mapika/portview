@@ -96,10 +96,11 @@ Or configure it manually:
 | Tool | What it does |
 |------|--------------|
 | `list_ports` | Every listening port with process, user, uptime, memory, full command |
-| `inspect_port` | One port in detail, including each process's working directory |
+| `inspect_port` | One port in detail: each process's working directory, plus its child processes — so the agent knows what else stops when it stops your dev server |
 | `find_process` | Which ports a service is on, by name or command substring |
 | `doctor` | Conflicts, wildcard exposure, stale connections, resource hogs |
-| `kill_port` | Terminate what's on a port (marked destructive to the client) |
+| `diff_ports` | What opened, closed, or changed owner since a baseline — "what did starting that actually do?" |
+| `kill_port` | Terminate what's on a port (marked destructive to the client). `dry_run` shows which PIDs it would signal, without signalling them |
 
 <p align="center">
   <img src="demo/mcp.gif" alt="portview MCP server demo" width="100%" loop=infinite>
