@@ -1,5 +1,5 @@
 {
-  description = "A diagnostic-first port viewer. See what's on your ports, then act on it.";
+  description = "List ports and their processes on Linux, macOS, and Windows.";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -22,7 +22,7 @@
             cargoLock.lockFile = ./Cargo.lock;
 
             meta = with pkgs.lib; {
-              description = "A diagnostic-first port viewer. See what's on your ports, then act on it.";
+              description = "List ports and their processes on Linux, macOS, and Windows.";
               homepage = "https://github.com/Mapika/portview";
               license = licenses.mit;
               mainProgram = "portview";

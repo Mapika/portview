@@ -4,34 +4,39 @@
 [![Crates.io](https://img.shields.io/crates/v/portview)](https://crates.io/crates/portview)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**See what's on your ports, then act on it. So can your AI agent.**
-
-`lsof -i` is slow and cryptic. `ss -tlnp` is unreadable. `netstat` is deprecated. You just want to know what's on port 3000 and kill it.
-
-```bash
-portview
-```
-
-One command. Every listening port, the process behind it, memory usage, uptime, and the full command — in a colored table. Then inspect, kill, or watch it live.
+portview lists ports and the processes using them on Linux, macOS, and Windows.
+It shows process names, commands, memory usage, and uptime. You can inspect a
+port, stop its process, or monitor changes in an interactive terminal UI.
 
 <p align="center">
   <img src="demo/demo.gif" alt="portview demo" width="100%" loop=infinite>
 </p>
 
-It's also an **[MCP server](#mcp-server-for-ai-agents)** — one binary, no Node, no `npx` — so Claude Code and Cursor can answer "what's on 3000?" without shelling out to `lsof` and misparsing the result.
-
-~1 MB single binary. Zero runtime dependencies. Linux, macOS, and Windows.
+It also supports [Docker](#docker-integration), [remote hosts over SSH](#ssh-remote-mode),
+and an [MCP server](#mcp-server-for-ai-agents) for coding agents.
 
 ## Install
 
+Homebrew:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mapika/portview/main/install.sh | sh   # Linux/macOS
-irm https://raw.githubusercontent.com/mapika/portview/main/install.ps1 | iex         # Windows
-brew install mapika/tap/portview                                                      # Homebrew
-cargo install portview                                                                # Cargo
+brew install mapika/tap/portview
 ```
 
-Or grab a binary from [Releases](https://github.com/mapika/portview/releases).
+Linux / macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mapika/portview/main/install.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/mapika/portview/main/install.ps1 | iex
+```
+
+Or use `cargo install portview`, or download a binary from
+[Releases](https://github.com/mapika/portview/releases).
 
 ## What it does
 
@@ -41,7 +46,7 @@ portview 3000                     # inspect port 3000 in detail
 portview node                     # find ports by process name
 portview watch                    # interactive TUI with live refresh
 portview watch --docker           # TUI with Docker containers as rows
-portview kill 3000 --force        # kill what's on port 3000
+portview kill 3000 --force        # terminate the process using port 3000
 portview doctor                   # diagnose port conflicts and issues
 portview ssh user@server          # inspect ports on a remote host
 portview ssh user@server watch    # remote TUI over SSH
@@ -66,7 +71,8 @@ $ portview
 ╰──────┴───────┴─────┴──────────────┴──────┴────────────┴────────┴────────┴────────────────────────────╯
 ```
 
-`--all` includes non-listening connections — one row per connection, so a pile-up of `TIME_WAIT` or `CLOSE_WAIT` sockets is visible rather than collapsed. `--wide` shows full commands. `--json` for scripting.
+`--all` includes non-listening connections, with one row per connection.
+`--wide` shows full commands. `--json` produces JSON output for scripts.
 
 Ports whose owner can't be resolved are still listed, with `-` in the columns that can't be filled. That happens for another user's process without `sudo`, and for sockets like `TIME_WAIT` that outlive the process that opened them.
 
@@ -74,7 +80,9 @@ Ports whose owner can't be resolved are still listed, with `-` in the columns th
 
 ### MCP server (for AI agents)
 
-Give your coding agent eyes on your ports. `portview mcp` speaks the [Model Context Protocol](https://modelcontextprotocol.io) over stdio, so Claude Code, Cursor, and any other MCP client can query and act on ports directly instead of shelling out to `lsof` and guessing at the output.
+`portview mcp` provides port queries, diagnostics, and process termination over
+the [Model Context Protocol](https://modelcontextprotocol.io) using stdio.
+To register it with Claude Code:
 
 ```bash
 claude mcp add portview -- portview mcp
@@ -95,20 +103,19 @@ Or configure it manually:
 
 | Tool | What it does |
 |------|--------------|
-| `list_ports` | Every listening port with process, user, uptime, memory, full command |
-| `inspect_port` | One port in detail: each process's working directory, plus its child processes — so the agent knows what else stops when it stops your dev server |
-| `find_process` | Which ports a service is on, by name or command substring |
-| `doctor` | Conflicts, wildcard exposure, stale connections, resource hogs |
-| `diff_ports` | What opened, closed, or changed owner since a baseline — "what did starting that actually do?" |
-| `kill_port` | Terminate what's on a port (marked destructive to the client). `dry_run` shows which PIDs it would signal, without signalling them |
+| `list_ports` | List listening ports with available process details |
+| `inspect_port` | Inspect a port, including process working directories and descendants |
+| `find_process` | Find ports by process name or command substring |
+| `doctor` | Check for conflicts, wildcard exposure, connection buildup, and high memory usage |
+| `diff_ports` | Report ports that opened, closed, or changed owner since a baseline |
+| `kill_port` | Terminate processes using a port; `dry_run` previews the targets. Marked destructive to the client |
 
 <p align="center">
   <img src="demo/mcp.gif" alt="portview MCP server demo" width="100%" loop=infinite>
 </p>
 
-**No Node, no `npx`, no runtime.** It's the same ~1 MB binary — nothing extra to install. The MCP server added 29 KB, because it pulls in no new dependencies.
-
-Pass `--read-only` to withhold `kill_port` entirely, so the agent can look but not touch:
+The MCP server is included in the portview binary. Pass `--read-only` to disable
+the `kill_port` tool:
 
 ```bash
 portview mcp --read-only
@@ -121,7 +128,7 @@ Listed in the [MCP Registry](https://registry.modelcontextprotocol.io) as
 
 ```bash
 portview watch                    # live-refresh every 1s
-portview watch --docker           # Docker containers as first-class rows
+portview watch --docker           # include Docker containers
 portview watch --sort mem         # sort by memory on launch
 ```
 
@@ -136,13 +143,14 @@ portview watch --sort mem         # sort by memory on launch
 | `a` | Toggle all/listening-only |
 | `q` | Quit |
 
-**Tree view** (`t`): Groups child processes under their parents with visual connectors. See which workers belong to which master process at a glance.
+**Tree view** (`t`): Groups child processes under their parents.
 
 **Detail view** (`Enter`): Shows the full unwrapped command, working directory, child process list with ports, and open connections (in `--all` mode).
 
 ### Doctor
 
-Diagnose common port problems in one command:
+`portview doctor` checks for port conflicts, wildcard bindings, connection
+buildup, and high memory usage:
 
 ```
 $ portview doctor
@@ -159,15 +167,14 @@ $ portview doctor
 | Port conflicts | Multiple PIDs bound to the same port |
 | Wildcard exposure | Databases (postgres, redis, mysql, mongod, …) listening on `0.0.0.0` |
 | Docker-host conflicts | A container publishing a port the host already uses |
-| Stale connections | TIME_WAIT or CLOSE_WAIT pileups on one port — a connection leak |
-| Resource hogs | Listeners holding more than 1 GB resident |
+| Connection buildup | High counts of TIME_WAIT or CLOSE_WAIT connections on one port; these do not by themselves establish a leak |
+| High memory usage | Listening processes using more than 1 GB of resident memory |
 
 Docker is auto-detected. `portview doctor --json` for scripting (exit code 1 on errors).
 
 #### In CI
 
-There's a GitHub Action, so a workflow can fail when a service ends up exposed
-or a test run leaks connections:
+The GitHub Action runs `doctor` and can fail a workflow on errors or warnings:
 
 ```yaml
 - uses: mapika/portview@v2
@@ -190,7 +197,7 @@ Set `install: false` if portview is already on PATH. Linux and macOS runners.
 
 ### SSH remote mode
 
-Inspect ports on any machine you can SSH to:
+Inspect ports on a remote host over SSH:
 
 ```bash
 portview ssh user@server              # one-shot scan
@@ -202,9 +209,9 @@ portview ssh user@server --ssh-opt "-p 2222"  # custom SSH port
 
 Kill actions in the remote TUI are forwarded over SSH.
 
-**Nothing to install on the remote host.** If portview isn't there, it falls back
-automatically to collecting over the same SSH connection with `ss` and `ps` —
-present on essentially every Linux box:
+If portview is not installed on the remote host, SSH mode collects data using
+`ss` and `ps`, or `lsof` and `ps` where `ss` is unavailable. This requires a
+POSIX shell and the collection tools on the remote host.
 
 ```
 $ portview ssh user@server
@@ -217,38 +224,30 @@ portview not found on user@server — falling back to agentless mode (ss + ps ov
 ╰──────┴───────┴─────┴──────────────┴──────┴─────────┴────────┴───────┴──────────────────────╯
 ```
 
-Force it with `--agentless` to skip the remote portview entirely. You still get
-the process, user, memory, uptime, and full command — it resolves
-`/proc/<pid>/exe` on the remote host, so a Node server reads as `node` rather
-than the `MainThread` that `ss` reports.
+Use `--agentless` to collect data this way even when portview is installed on
+the remote host. It supports scans, port inspection, process search,
+diagnostics, and watch mode.
 
-`doctor` works agentless too — the checks are pure functions over collected
-data, so they run locally against whatever the probe brought back:
+Run diagnostics on the collected data:
 
 ```bash
 portview ssh user@server doctor --agentless
 ```
 
-That produces the same findings as running `portview doctor` on the host
-itself. The Docker check is reported as skipped rather than passed, since the
-probe doesn't query Docker on the far end.
+This uses the same diagnostic checks as local mode. The Docker check is
+skipped because agentless mode does not query remote containers.
 
-`watch` works agentless as well, including the interactive kill:
+Watch remote ports, with process termination available in the TUI:
 
 ```bash
 portview ssh user@server watch --agentless
 ```
 
-The probe loops on the far end and the TUI reads the records it sends back, so
-the whole session costs one SSH connection rather than one per refresh.
-
-Agentless mode covers everything: scans, port inspection, process search,
-diagnostics, and watch. On Linux it uses `ss` and `ps`; where `ss` does not
-exist it falls back to `lsof`, which covers macOS and the BSDs.
+Watch mode collects updates through a single persistent SSH connection.
 
 ### Docker integration
 
-Add `--docker` to any command. Docker-published ports appear as first-class rows:
+Use `--docker` to include ports published by Docker containers:
 
 ```
 $ portview --docker
@@ -262,7 +261,8 @@ $ portview --docker
 
 Container-only rows have no host process, so `PID`, `UPTIME`, and `MEM` render as `-`.
 
-Press `d` on a Docker row to **Stop**, **Restart**, or **tail Logs**.
+In watch mode, press `d` on a Docker row to stop or restart the container, or
+follow its logs.
 
 ### JSON output
 
@@ -283,7 +283,7 @@ Columns: `port`, `proto`, `pid`, `user`, `process`, `uptime`, `mem`, `command`. 
 
 ## How it works
 
-All data is read directly from the OS — no shelling out to `lsof`, `ss`, or `netstat`.
+Local port and process data comes from OS interfaces:
 
 | Field | Linux | macOS | Windows |
 |-------|-------|-------|---------|
@@ -293,35 +293,13 @@ All data is read directly from the OS — no shelling out to `lsof`, `ss`, or `n
 | Memory | `/proc/<pid>/status` VmRSS | `proc_pidinfo` | `K32GetProcessMemoryInfo` |
 | Uptime | `/proc/<pid>/stat` | `proc_pidinfo` | `GetProcessTimes` |
 
-The process name comes from the **executable**, not `/proc/<pid>/comm`. `comm` is the thread name, and runtimes overwrite it — Node.js renames its main thread to `MainThread`, which is why `ps`, `ss`, and `lsof` all report a Node dev server as `MainThread`. It is also truncated to 15 bytes.
+On Linux, portview reads the executable name from `/proc/<pid>/exe`.
+The thread name in `/proc/<pid>/comm` can be changed by the runtime and is
+limited to 15 bytes.
 
-Docker integration queries `docker ps` when `--docker` is passed. SSH mode runs `portview --json` on the remote host via the system `ssh` binary. MCP mode speaks newline-delimited JSON-RPC 2.0 on stdin/stdout, with a hand-rolled JSON reader — no serde, no extra dependency.
-
-## Why not...
-
-| Tool | What's missing |
-|------|---------------|
-| `lsof -i :3000` | Different flags per OS, cryptic output, slow |
-| `ss -tlnp` | Unreadable, no uptime/memory/docker, no TUI |
-| `netstat` | Deprecated on modern Linux, limited info |
-| `fkill-cli` | Requires Node.js, kill-first not diagnostic-first |
-| `procs` | General process viewer, not port-centric |
-
-None of them speak MCP, so none of them can be handed to an agent.
-
-There's also a smaller thing they all get wrong. Start a Node dev server and ask what's on the port:
-
-```
-$ ss -tlnp | grep 3000
-LISTEN 0      511        127.0.0.1:3000      0.0.0.0:*    users:(("MainThread",pid=6,fd=21))
-
-$ portview 3000
-Port 3000 (TCP) — node (PID 6)
-```
-
-`ps`, `ss`, and `lsof` all read `/proc/<pid>/comm`, the thread name — and Node renames its main thread to `MainThread`. portview reads the executable instead.
-
-portview is **diagnostic-first**: understand what's on your ports, then act.
+Docker integration uses the `docker` CLI. SSH mode uses the system `ssh`
+client to run portview or the agentless collection tools on the remote host.
+MCP mode uses newline-delimited JSON-RPC 2.0 on stdin/stdout.
 
 ## Building from source
 
@@ -333,9 +311,8 @@ cargo build --release
 
 Requires Rust 1.85+ (edition 2024). Shell completions and man page are generated at build time.
 
-There's also a `Dockerfile`. Note that a container has its own network and PID
-namespaces, so portview inside one sees the *container's* ports — share the
-host's namespaces to inspect the host:
+The repository includes a `Dockerfile`. To inspect the host from a container,
+share the host's network and PID namespaces:
 
 ```bash
 docker run --rm -i --network host --pid host portview

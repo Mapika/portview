@@ -326,7 +326,7 @@ jobs:
         run: |
           cat > Formula/portview.rb << EOF
           class Portview < Formula
-            desc "A diagnostic-first port viewer. See what's on your ports, then act on it."
+            desc "List ports and their processes on Linux, macOS, and Windows."
             homepage "https://github.com/Mapika/portview"
             version "${VERSION}"
             license "MIT"

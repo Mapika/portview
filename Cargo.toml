@@ -2,7 +2,7 @@
 name = "portview"
 version = "2.1.0"
 edition = "2024"
-description = "A diagnostic-first port viewer. See what's on your ports, then act on it."
+description = "List ports and their processes on Linux, macOS, and Windows."
 license = "MIT"
 repository = "https://github.com/mapika/portview"
 keywords = ["port", "process", "diagnostic", "network", "cli"]

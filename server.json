@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Mapika/portview",
   "title": "portview",
-  "description": "See what's on your ports, the processes behind them, and diagnose conflicts and leaks.",
+  "description": "Query ports and processes, run diagnostics, compare port snapshots, and terminate processes over MCP.",
   "repository": {
     "url": "https://github.com/Mapika/portview",
     "source": "github"

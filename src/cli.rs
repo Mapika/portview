@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "portview",
-    about = "See what's on your ports, then act on it.",
+    about = "List ports and their processes on Linux, macOS, and Windows.",
     version,
     after_help = "Examples:\n  portview                   Show all listening ports\n  portview 3000              Inspect port 3000 in detail\n  portview watch --docker    Interactive watch with Docker context\n  portview kill 3000 --force Force-kill process(es) on port 3000\n\nLegacy flags (--watch, --kill) are still supported."
 )]

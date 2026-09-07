@@ -2,7 +2,7 @@
 pkgname=portview
 pkgver=1.2.1
 pkgrel=1
-pkgdesc='A diagnostic-first port viewer. See what is on your ports, then act on it.'
+pkgdesc='List ports and their processes on Linux, macOS, and Windows.'
 arch=('x86_64' 'aarch64')
 url='https://github.com/Mapika/portview'
 license=('MIT')
